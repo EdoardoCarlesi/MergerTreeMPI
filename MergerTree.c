@@ -60,7 +60,7 @@
 #endif
 
 #define ORDER				// Order halos in merger tree by merit function
-//#define DEBUG_MPI
+#define DEBUG_MPI
 
 
 /*-------------------------------------------------------------------------------------
@@ -102,13 +102,18 @@ typedef struct PARTS
  *-------------------------------------------------------------------------------------*/
 
 HALOptr halos[2];
+HALOptr halos_tmp[2];
 PARTptr parts[2];
 PARTptr parts_buffer[2];	// on each task we need a buffer structure to save the incoming swapped particles
 
 
 uint64_t    nHalos[2];
+uint64_t    nHalosTmp[2];
 uint64_t    nPart[2];		// total number of particles on task, use this instead of PidMax
+uint64_t    nPartTmp[2];		
+
 size_t      totHaloSize;	// when reading-in the halo keep track of its size including dynamically allocated mem
+size_t      totHaloSizeTmp;	
 
 int NReadTask;		// NReadTask is the number of tasks reading the files
 int TotTask; 
@@ -116,6 +121,8 @@ int LocTask;
 int SendTask; 
 int RecvTask;
 int DeltaTask;
+int filesPerTask; 
+int extraFilesPerTask;
 MPI_Status status;
 
 #ifdef MERGER_RATIO
@@ -125,7 +132,7 @@ uint64_t nlines;  // number of lines in *_mtree file
 /*-------------------------------------------------------------------------------------
  *                                 ALL THOSE FUNCTIONS
  *-------------------------------------------------------------------------------------*/
-int      read_particles         (char filename[MAXSTRING], int isimu);
+int      read_particles         (char filename[MAXSTRING], int isimu, int ifile);
 int      particle_halo_mapping  (int  isimu);
 int      halo_particle_mapping  (int  isimu);
 int      cross_correlation      (int  iloop); 
@@ -134,8 +141,9 @@ int      clean_connection       (uint64_t ihalo, int isimu0, int isimu1);
 int      write_mtree            (int isimu0, char OutFile[MAXSTRING]);
 uint64_t max_merit              (uint64_t ihalo, int isimu);
 
-int	 assign_input_files_to_tasks	(char *partList, char *tempDir, char **locPartFile, int nFiles);
+int	 assign_input_files_to_tasks	(char *partList, char *tempDir, char ***locPartFile, int nFiles);
 int 	 cmpfunc			(const void * a, const void * b); 
+int	 add_halos			(int ifile, int isimu);
 int      alloc_halos			(int isimu);
 int      free_halos			(int isimu);
 int 	 load_balance			(int isimu); 
@@ -160,7 +168,7 @@ void 	check_halos			(int isimu);
  *==================================================================================================*/
 int main(int argv, char **argc)
 {
-  int    ifile, jchunk, count, nFiles;   // nFiles is now the total number of files to be read by a single task. Each task
+  int    ifile, jfile, jchunk, count, nFiles;   // nFiles is now the total number of files to be read by a single task. Each task
 				// loads in one _particle file per redshift.
   char   *tempDir;		// Temporary files are stored here - to be cleaned at the end of the run
   char   *partList;		// This file contains all the files to be submitted to task 0 
@@ -170,7 +178,8 @@ int main(int argv, char **argc)
   uint64_t buffer_npart;	// Buffer to recieve the new total number of particles
   uint64_t buffer_nhalo;	// Buffer to recieve the new total number of halos
   time_t    elapsed = (time_t)0, total = (time_t) 0;
-  char   **locPartFile=NULL;		// Each task stores _particle urls here
+
+  char   ***locPartFile=NULL;		// Each task stores _particle urls here
   char   **locOutFile=NULL;		// Each task will dump to this file
 
   count = 1 ;
@@ -197,7 +206,21 @@ int main(int argv, char **argc)
   SendTask = (LocTask+TotTask-1) % (TotTask); 
   RecvTask = (LocTask+1) % (TotTask);
   DeltaTask = TotTask - NReadTask; 
-    
+
+  /* This is useful if you have more file-chunks than tasks */
+  if(NReadTask > TotTask)
+  {
+     filesPerTask = (int) NReadTask / TotTask;  
+     extraFilesPerTask = (int) NReadTask % TotTask;  
+
+     if(LocTask < extraFilesPerTask)
+       filesPerTask++; 
+  }
+  else
+  {
+     filesPerTask = 1;
+  }
+
   /* allocate memory for locOutFiles, each of size MAXSTRING */
   locOutFile  = (char **) calloc(nFiles, sizeof(char *));
 
@@ -211,15 +234,6 @@ int main(int argv, char **argc)
   if(LocTask == 0)
      fprintf(stderr, "MergerTree MPI mode, reading %d files per task on %d tasks on a total of %d cpus.\n", 
 		nFiles, NReadTask, TotTask);
-
-  /* check that we have enough tasks to read the files */
-  if(NReadTask > TotTask)
-  {
-    if(LocTask == 0)
-      fprintf(stderr, "Error. The number of tasks reading (%d) is larger than the number of tasks assigned (%d)\n", 
-        	NReadTask, TotTask);
-    exit(1);
-  }
   
   /* read the first file into memory */
   if(LocTask == 0)
@@ -229,17 +243,25 @@ int main(int argv, char **argc)
   if(LocTask < NReadTask)
   {
      /* alloc memory for local urls storage */
-     locPartFile  = (char **) calloc(nFiles, sizeof(char *));
+     locPartFile = (char ***) calloc(filesPerTask, sizeof(char **));
+
+     for(ifile=0; ifile<filesPerTask; ifile++)
+       locPartFile[ifile] = (char **) calloc(nFiles, sizeof(char *));
 
      /* now assign a list of urls to every task and alloc local memory */
      assign_input_files_to_tasks(partList, tempDir, locPartFile, nFiles);
   
-     read_particles(locPartFile[0], 0);
+     /* read particles now reads into the tmp file which is reallocated in the main halos struct */
+     for(ifile=0; ifile<filesPerTask; ifile++)
+     {
+        read_particles(locPartFile[ifile][0], 0, ifile);
+        add_halos(ifile, 0);
+     }
   }
 
     /*  If TotTask > NReadTask then redistribute particles across different tasks */
-    if(DeltaTask > 0)   
-       load_balance(0);  
+    if(DeltaTask > 0) 
+      load_balance(0);  
 
     /* map the particles from the halos after load balancing */
     particle_halo_mapping(0);
@@ -255,12 +277,16 @@ int main(int argv, char **argc)
     /* be verbose */
   if(LocTask == 0)
     fprintf(stderr,"Correlating '%s' to '%s'\n           -> writing to '%s'\n",
-            locPartFile[ifile],locPartFile[ifile+1],locOutFile[ifile]);
+            locPartFile[ifile][0],locPartFile[ifile][1+ifile],locOutFile[ifile]);
 
     /* every task reads the next file into memory - the next file should be a chunk of _particle files
        at a different redshift */
   if(LocTask < NReadTask)
-    read_particles(locPartFile[ifile+1], 1);
+    for(jfile=0; jfile<filesPerTask; jfile++)
+    {
+       read_particles(locPartFile[jfile][1+ifile], 1, jfile);
+       add_halos(jfile, 1);
+    }
 
     /* if NTask > N files to be read then scatter the data through the tasks */
     if(DeltaTask > 0)   
@@ -521,20 +547,15 @@ int load_balance(int isimu)
          minNPartTmp = partPerTask[itask];
  	 nPartFacTmp = (double) minNPartTmp * LB_PART_FAC * sqrt(nHalosBuffer[itask] * LB_HALO_FAC);
 
-         //if(minNPartTmp < minNPart) 
          if(nPartFacTmp < nPartFac) 
          {
 	    irecv = itask;
-//	    minNPart = partPerTask[itask];
 	    nPartFac = nPartFacTmp;
-//partPerTask[itask];
          }
       }
 
          partPerTask[irecv] += locNPart;
 
-//	irecv = rand() % (nRecvTasks[LocTask]+1);
-//      if(ihalo==1) minNPart = partPerTask[irecv];
 #endif
 
 
@@ -605,7 +626,8 @@ int load_balance(int isimu)
       {
         halos[isimu][ihalo].Pindex[jpart] = ipart;
         ipart++;
-      }      
+      }
+      
       free(temp_halo[isimu][ihalo].Pid);
    }
 
@@ -615,7 +637,6 @@ int load_balance(int isimu)
 #endif
 
    free(temp_halo[isimu]);
-
 
 #ifdef DEBUG_LOG 
    if(LocTask < NReadTask)
@@ -739,9 +760,9 @@ int load_balance(int isimu)
  *      NReadTask = number of processors actually reading (must be smaller or equal to the number of tasks) 
  *
  *==================================================================================================*/
-int assign_input_files_to_tasks(char *partList, char *tempDir, char **locPartFile, int nFiles)
+int assign_input_files_to_tasks(char *partList, char *tempDir, char ***locPartFile, int nFiles)
 {
-  int i;
+  int ifile, jfile;
   FILE *locPartListFile=NULL;
   char command[MAXSTRING];
   char locPartList[MAXSTRING];
@@ -751,31 +772,40 @@ int assign_input_files_to_tasks(char *partList, char *tempDir, char **locPartFil
   if(LocTask == 0)
     fprintf(stderr, "\n  o assigning files to each task from %s\n", partList);
 
+//  locPartList[MAXSTRING] = (char *) calloc(filesPerTask, sizeof(char));
+
   if(LocTask < NReadTask)
   {
-    sprintf(task, "%04d", LocTask); 
-    sprintf(locPartList, "%s.%s.tmp", tempDir, task);
-    sprintf(command, "sed s/0000/%s/ <%s >%s", task, partList, locPartList);
-    system(command);
-
-    locPartListFile = fopen(locPartList, "r");
-
-    for(i=0; i<nFiles; i++)
+    
+    for(ifile=0; ifile<filesPerTask; ifile++)
     {
-      fgets(dummy, MAXSTRING-1, locPartListFile);
-      locPartFile[i] = (char*) calloc(strlen(dummy)+1, sizeof(char));
-      strcpy(locPartFile[i], dummy);
-      locPartFile[i][strlen(dummy)-1]='\0';
-#ifdef DEBUG_MPI
-      fprintf(stderr, "Task=%d will read from file %s\n", LocTask, locPartFile[i]);
-#endif
-    }
-  } /* else task remains idle */
-  
-  if(LocTask == 0)
-   fprintf(stderr, " done.\n");
+      sprintf(task, "%04d", LocTask + ifile * TotTask); 
+      sprintf(locPartList, "%s.%s.tmp", tempDir, task);
+      sprintf(command, "sed s/0000/%s/ <%s >%s", task, partList, locPartList);
+      system(command);
 
-  fclose(locPartListFile);
+      locPartListFile = fopen(locPartList, "r");
+
+      for(jfile=0; jfile<nFiles; jfile++)
+      {
+        fgets(dummy, MAXSTRING-1, locPartListFile);
+        locPartFile[ifile][jfile] = (char*) calloc(strlen(dummy)+5, sizeof(char));
+        strcpy(locPartFile[ifile][jfile], dummy);
+        locPartFile[ifile][jfile][strlen(dummy)-1]='\0';
+#ifdef DEBUG_MPI
+        fprintf(stderr, "Task=%d will read from file %s\n", LocTask, locPartFile[ifile][jfile]);
+#endif
+      }
+
+      /* close the temp file generated with the list of the files to be read */
+      fclose(locPartListFile);
+      locPartListFile = NULL;
+    } /* ifile, loop on the file chunks that each task is loading in */
+  } /* else task remains idle */
+
+  if(LocTask == 0)
+    fprintf(stderr, " done.\n");
+
   return(1);
 }
 
@@ -789,7 +819,7 @@ int assign_input_files_to_tasks(char *partList, char *tempDir, char **locPartFil
  *      Pid    = id's of all those particles
  *
  *==================================================================================================*/
-int read_particles(char filename[MAXSTRING], int isimu)
+int read_particles(char filename[MAXSTRING], int isimu, int ifile)
 {
   FILE     *fpin;
   char      line[MAXSTRING];
@@ -814,13 +844,13 @@ int read_particles(char filename[MAXSTRING], int isimu)
    }
   
   /* reset all variables */
-  nHalos[isimu] = 0;
-  nPart[isimu]  = 0;
+  nHalosTmp[isimu] = 0;
+  nPartTmp[isimu]  = 0;
   ihalo         = -1;
-  halos[isimu]  = NULL;
+  halos_tmp[isimu]  = NULL;
 
   /* this array keeps track of the size of each halo's dynamically allocated particle informations, Pid and Pindex */
-  totHaloSize = 0;
+  totHaloSizeTmp = 0;
 
   /* get the first line from file */
   fgets(line,MAXSTRING,fpin);
@@ -831,7 +861,11 @@ int read_particles(char filename[MAXSTRING], int isimu)
     fgets(line,MAXSTRING,fpin);  
   
       /* local numbering of the particle */
-      Pindex 	 = 0;
+  if(ifile == 0)
+      Pindex = 0;
+  else
+      Pindex = nPart[isimu];
+
   do {
     if(strncmp(line,"#",1) != 0)
      {
@@ -851,15 +885,15 @@ int read_particles(char filename[MAXSTRING], int isimu)
       
       /* found yet another halo */
       ihalo++;
-      nHalos[isimu] += 1;
-      halos[isimu]   = (HALOptr) realloc(halos[isimu], nHalos[isimu]*sizeof(HALOS));
+      nHalosTmp[isimu] += 1;
+      halos_tmp[isimu]   = (HALOptr) realloc(halos_tmp[isimu], nHalosTmp[isimu]*sizeof(HALOS));
 
       /* store haloid */
-      halos[isimu][ihalo].haloid = haloid;
+      halos_tmp[isimu][ihalo].haloid = haloid;
       
-      /* halos[][].Pid will be incrementally filled using realloc() */
-      halos[isimu][ihalo].Pid = NULL;
-      halos[isimu][ihalo].Pindex = NULL;
+      /* halos_tmp[][].Pid will be incrementally filled using realloc() */
+      halos_tmp[isimu][ihalo].Pid = NULL;
+      halos_tmp[isimu][ihalo].Pindex = NULL;
 
       nPartInUse = 0;
 
@@ -884,26 +918,26 @@ int read_particles(char filename[MAXSTRING], int isimu)
         if(Ptype == ONLY_USE_PTYPE)
 #endif
          {
-          halos[isimu][ihalo].Pid    = (uint64_t *) realloc(halos[isimu][ihalo].Pid, (nPartInUse+1)*sizeof(uint64_t));
-          halos[isimu][ihalo].Pindex = (uint64_t *) realloc(halos[isimu][ihalo].Pindex, (nPartInUse+1)*sizeof(uint64_t));
-          if(halos[isimu][ihalo].Pid == NULL) {
-            fprintf(stderr,"read_particles: could not realloc() halos[%d][%ld].Pid for %"PRIu64"particles\nABORTING\n",isimu,(long)ihalo,(nPartInUse+1));
+          halos_tmp[isimu][ihalo].Pid    = (uint64_t *) realloc(halos_tmp[isimu][ihalo].Pid, (nPartInUse+1)*sizeof(uint64_t));
+          halos_tmp[isimu][ihalo].Pindex = (uint64_t *) realloc(halos_tmp[isimu][ihalo].Pindex, (nPartInUse+1)*sizeof(uint64_t));
+          if(halos_tmp[isimu][ihalo].Pid == NULL) {
+            fprintf(stderr,"read_particles: could not realloc() halos_tmp[%d][%ld].Pid for %"PRIu64"particles\nABORTING\n",isimu,(long)ihalo,(nPartInUse+1));
             exit(-1);
           }
 
-          halos[isimu][ihalo].Pid[nPartInUse] = Pid;
-          halos[isimu][ihalo].Pindex[nPartInUse] = Pindex;
+          halos_tmp[isimu][ihalo].Pid[nPartInUse] = Pid;
+          halos_tmp[isimu][ihalo].Pindex[nPartInUse] = Pindex;
           nPartInUse++;
 	  Pindex++;
          }
        }
       
       /* store number of particles in halo */
-      halos[isimu][ihalo].npart = nPartInUse;  
+      halos_tmp[isimu][ihalo].npart = nPartInUse;  
 
       /* add to the total number of particles on task, plus the haloid and haloindex */    
-      nPart[isimu] += nPartInUse;
-      totHaloSize += 2 * (nPartInUse + 1) * sizeof(uint64_t);
+      nPartTmp[isimu] += nPartInUse;
+      totHaloSizeTmp += 2 * (nPartInUse + 1) * sizeof(uint64_t);
      }
 
   } while( fgets(line,MAXSTRING,fpin) != NULL);
@@ -913,7 +947,7 @@ int read_particles(char filename[MAXSTRING], int isimu)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-   fprintf(stderr," done in %ld sec, nHalos=%"PRIu64", totHaloSize=%zd\n", elapsed, nHalos[isimu], totHaloSize); 
+   fprintf(stderr," done in %ld sec, nHalosTmp=%"PRIu64", totHaloSizeTmp=%zd\n", elapsed, nHalosTmp[isimu], totHaloSize); 
 
   return(1);
 }
@@ -1444,6 +1478,62 @@ int alloc_halos(int isimu)
  return(1);
 }
 
+
+
+int add_halos(int ifile, int isimu)
+{
+  uint64_t nparts, ihalo, min_halo;
+  size_t sizeHalo;
+  
+  if(ifile == 0) /* init the halo struct when reading the first file */ 
+  {  
+     min_halo = 0;
+     nPart[isimu] = nPartTmp[isimu];
+     nHalos[isimu] = nHalosTmp[isimu];
+     totHaloSize = totHaloSizeTmp;
+     alloc_halos(isimu);
+  } else { /* realloc and make room for the new halos */
+     min_halo = nHalos[isimu];
+     nPart[isimu] += nPartTmp[isimu];
+     nHalos[isimu] += nHalosTmp[isimu];
+     totHaloSize += totHaloSizeTmp;
+     halos[isimu] = (HALOptr) realloc(halos[isimu], ( (nHalos[isimu]+1)) * sizeof(HALOS));
+  }
+
+  /* copy the halos into the old structure and free up memory */
+
+  for(ihalo=min_halo; ihalo<nHalos[isimu]; ihalo++)
+  {
+     nparts = halos_tmp[isimu][ihalo-min_halo].npart;
+     halos[isimu][ihalo].npart = halos_tmp[isimu][ihalo-min_halo].npart;
+     halos[isimu][ihalo].haloid = halos_tmp[isimu][ihalo-min_halo].haloid;
+     sizeHalo = nparts * sizeof(uint64_t);
+
+     fprintf(stderr, "Task=%d] MinHalo=%"PRIu64" MaxHalo=%"PRIu64" Npart=%"PRIu64" Nloop=%"PRIu64"\n", 
+	LocTask, min_halo, nHalos[isimu], nparts, ihalo);
+
+//     halos[isimu][ihalo].Pid = halos_tmp[isimu][ihalo].Pid;
+//     halos[isimu][ihalo].Pindex = halos_tmp[isimu][ihalo].Pindex;
+
+     halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeHalo);
+     halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeHalo);
+
+     memcpy(halos[isimu][ihalo].Pid, halos_tmp[isimu][ihalo-min_halo].Pid, sizeHalo);   
+     memcpy(halos[isimu][ihalo].Pindex, halos_tmp[isimu][ihalo-min_halo].Pindex, sizeHalo);
+
+     /* release the memory as the particles are copied */
+     free(halos_tmp[isimu][ihalo-min_halo].Pindex);
+     free(halos_tmp[isimu][ihalo-min_halo].Pid);
+  }
+
+  /* free the temporary structures */	
+  free(halos_tmp[isimu]);
+  nHalosTmp[isimu]=0;
+  nPartTmp[isimu]=0;
+  totHaloSizeTmp=0;
+
+  return(1);
+} 
 
   /* Clean up the halos */
 int free_halos(int isimu)
