@@ -413,20 +413,20 @@ int main(int argv, char **argc)
   if(parts[0] != NULL) free(parts[0]);
 
   /* free input filename storage */
-/*
+
   if(LocTask < NReadTask)
   {
-    for(ifile=0; ifile<nFiles; ifile++)
-      if(locPartFile[ifile]) free(locPartFile[ifile]);
-       if(locPartFile) free(locPartFile);
+    for(jfile=0; jfile<filesPerTask; jfile++)
+      for(ifile=0; ifile<nFiles; ifile++)
+        if(locPartFile[jfile][ifile]) free(locPartFile[jfile][ifile]);
+         if(locPartFile) free(locPartFile);
   }
-*/
+
   /* free output filename storage*/
-/*  for(ifile=0; ifile<nFiles; ifile++)
+  for(ifile=0; ifile<nFiles; ifile++)
     if(locOutFile[ifile])  free(locOutFile[ifile]);
 
   if(locOutFile)  free(locOutFile);
-*/
 
   if(LocTask == 0)
     printf("finished\n");
