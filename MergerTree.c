@@ -1509,8 +1509,8 @@ int add_halos(int ifile, int isimu)
      halos[isimu][ihalo].haloid = halos_tmp[isimu][ihalo-min_halo].haloid;
      sizeHalo = nparts * sizeof(uint64_t);
 
-     fprintf(stderr, "Task=%d] MinHalo=%"PRIu64" MaxHalo=%"PRIu64" Npart=%"PRIu64" Nloop=%"PRIu64"\n", 
-	LocTask, min_halo, nHalos[isimu], nparts, ihalo);
+//     fprintf(stderr, "Task=%d] MinHalo=%"PRIu64" MaxHalo=%"PRIu64" Npart=%"PRIu64" Nloop=%"PRIu64"\n", 
+//	LocTask, min_halo, nHalos[isimu], nparts, ihalo);
 
 //     halos[isimu][ihalo].Pid = halos_tmp[isimu][ihalo].Pid;
 //     halos[isimu][ihalo].Pindex = halos_tmp[isimu][ihalo].Pindex;
@@ -1596,12 +1596,9 @@ int cmpfunc(const void * a, const void * b)
 uint64_t constructHaloId(uint64_t ihalo)
 {
   uint64_t haloid;
-  int      rank;
-  
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   
   // we allow for 64-48=16 bits for the MPI_rank (up to 65536 MPI tasks)
-  haloid = (uint64_t) rank;
+  haloid = (uint64_t) LocTask;
   haloid = haloid << 48;
 
   // simply overlay line number now
@@ -1634,7 +1631,6 @@ void check_halos(int isimu)
            fprintf(stdout, "\t\tpart_id=%"PRIu64"\n", halos[isimu][i].Pid[j]);
     }
 }
-#endif
 
 
 #ifdef DEBUG_LOG
@@ -1665,6 +1661,7 @@ void dump_log_halo(int isimu, int ihalo)
  
   fclose(log_halo);
 }
+#endif
 #endif
 
 #ifdef MERGER_RATIO
