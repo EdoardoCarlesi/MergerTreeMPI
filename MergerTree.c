@@ -273,17 +273,20 @@ int main(int argv, char **argc)
   for(ifile=0; ifile<nFiles-1; ifile++)
   {
     sprintf(locOutFile[ifile], "%s_%03d-%03d.%04d", prefixOut, ifile, ifile+1, LocTask); 
- 
-    /* be verbose */
-  if(LocTask == 0)
-    fprintf(stderr,"Correlating '%s' to '%s'\n           -> writing to '%s'\n",
-            locPartFile[ifile][0],locPartFile[ifile][1+ifile],locOutFile[ifile]);
 
     /* every task reads the next file into memory - the next file should be a chunk of _particle files
        at a different redshift */
   if(LocTask < NReadTask)
-    for(jfile=0; jfile<filesPerTask; jfile++)
+    for(jfile=0; jfile<filesPerTask; jfile++) /* this works if each task reads in more than one file */
     {
+       /* be verbose */
+       if(LocTask == 0 && jfile == 0)
+         fprintf(stderr,"Correlating '%s' to '%s'\n           -> writing to '%s'\n",
+           locPartFile[jfile][ifile],locPartFile[jfile][1+ifile],locOutFile[ifile]);
+#ifdef DEBUG_MPI
+  if(LocTask == 0)
+       fprintf(stderr, "Loop=%d), jfile=%d, filename=%s\n", ifile, jfile, locPartFile[jfile][1+ifile]);
+#endif
        read_particles(locPartFile[jfile][1+ifile], 1, jfile);
        add_halos(jfile, 1);
     }
@@ -383,8 +386,8 @@ int main(int argv, char **argc)
     free_halos(0);
 
      if(parts[0] != NULL) {
-      free(parts[0]);
-      parts[0] = NULL;
+        free(parts[0]);
+        parts[0] = NULL;
     }
 
     /* make HaloFile[i+1] the new HaloFile[i] */
@@ -410,18 +413,20 @@ int main(int argv, char **argc)
   if(parts[0] != NULL) free(parts[0]);
 
   /* free input filename storage */
+/*
   if(LocTask < NReadTask)
   {
     for(ifile=0; ifile<nFiles; ifile++)
       if(locPartFile[ifile]) free(locPartFile[ifile]);
        if(locPartFile) free(locPartFile);
   }
-
+*/
   /* free output filename storage*/
-  for(ifile=0; ifile<nFiles; ifile++)
+/*  for(ifile=0; ifile<nFiles; ifile++)
     if(locOutFile[ifile])  free(locOutFile[ifile]);
 
   if(locOutFile)  free(locOutFile);
+*/
 
   if(LocTask == 0)
     printf("finished\n");
