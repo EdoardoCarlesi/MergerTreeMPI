@@ -60,7 +60,7 @@
 #endif
 
 #define ORDER				// Order halos in merger tree by merit function
-#define DEBUG_MPI
+//#define DEBUG_MPI
 
 
 /*-------------------------------------------------------------------------------------
@@ -309,8 +309,9 @@ int main(int argv, char **argc)
 
       elapsed += time(NULL);
 
-      fprintf(stderr, "Cross correlation on task=%d completed step %d/%d in %ld sec.\n", 
-	LocTask, jchunk+1, TotTask, elapsed);
+      if(LocTask == 0)
+        fprintf(stderr, "Cross correlation on task=%d completed step %d/%d in %ld sec.\n", 
+	  LocTask, jchunk+1, TotTask, elapsed);
 
       total += elapsed;
       elapsed = (time_t) 0;
@@ -407,7 +408,7 @@ int main(int argv, char **argc)
    *                             CLEANUP                              *
    *==================================================================*/
     if(LocTask == 0)
-  fprintf(stderr,"\nCleaning up ...\n");
+      fprintf(stderr,"\nCleaning up ...\n");
 
   free_halos(0);
   if(parts[0] != NULL) free(parts[0]);
@@ -1093,7 +1094,8 @@ int cross_correlation(int iloop)
   /*---------------------------------------------------------
    * backwards correlation
    *---------------------------------------------------------*/
-
+    
+  if(LocTask == 0 && iloop == 0)
     fprintf(stderr,"  o generating cross-correlation 0->1 for %"PRIu64" haloes on %d tasks...",
 		nHalos[0], TotTask);
 
