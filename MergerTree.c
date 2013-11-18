@@ -308,12 +308,12 @@ int main(int argv, char **argc)
       cross_correlation(jchunk);
 
       elapsed += time(NULL);
+      total += elapsed;
 
       if(LocTask == 0)
-        fprintf(stderr, "Cross correlation on task=%d completed step %d/%d in %ld sec.\n", 
-	  LocTask, jchunk+1, TotTask, elapsed);
+        fprintf(stderr, "Cross correlation on task=%d completed step %d/%d in %ld sec, total elapsed time=%ld.\n", 
+	  LocTask, jchunk+1, TotTask, elapsed, total);
 
-      total += elapsed;
       elapsed = (time_t) 0;
 
 #ifdef DEBUG_MPI 
@@ -1103,6 +1103,7 @@ int cross_correlation(int iloop)
    fprintf(stderr, "\ncreating mtree for %"PRIu64" haloes on task %d\n", nHalos[0], LocTask);
 #endif 
 
+  elapsed -= time(NULL);
   /* cross-correlation simu0->simu1. When creating the m_tree now we need to 
    * take into account that simu1 is split in TotTask files, and we now are
    * creating the m_tree for the iLoop-th one
@@ -1554,6 +1555,9 @@ int free_halos(int isimu)
 
     if(halos[isimu][i].Pindex != NULL)
       free(halos[isimu][i].Pindex);
+
+    if(halos[isimu][i].mtree != NULL)
+      free(halos[isimu][i].mtree);
   }
 
   free(halos[isimu]);
