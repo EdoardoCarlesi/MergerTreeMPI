@@ -48,7 +48,7 @@
 //#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
 //#define DEBUG
 
-#define NUM_OMP_THREADS 1
+#define NUM_OMP_THREADS 2
 
 #define IMPROVE_LB	// As the workload on each task depends on both the total number of particles and 
 			// the total number of halos, this flag enables a L/B algorithm that balances the
@@ -59,6 +59,7 @@
 #define LB_HALO_FAC 1.0
 #endif
 
+#define COUNTER 5000
 #define ORDER				// Order halos in merger tree by merit function
 //#define DEBUG_MPI
 
@@ -311,8 +312,8 @@ int main(int argv, char **argc)
       total += elapsed;
 
       if(LocTask == 0)
-        fprintf(stderr, "Cross correlation on task=%d completed step %d/%d in %ld sec, total elapsed time=%ld.\n", 
-	  LocTask, jchunk+1, TotTask, elapsed, total);
+        fprintf(stderr, "Cross correlation completed step %d/%d of file %d in %ld sec, total elapsed time=%ld.\n", 
+	  LocTask, jchunk+1, TotTask, jfile, elapsed, total);
 
       elapsed = (time_t) 0;
 
@@ -1101,7 +1102,7 @@ int halo_particle_mapping(int isimu)
  *==================================================================================================*/
 int cross_correlation(int iloop)
 {
-  uint64_t  ihalo, count=500;
+  uint64_t  ihalo, count=COUNTER;
   time_t   elapsed = (time_t)0;
   
   /*---------------------------------------------------------
