@@ -359,8 +359,10 @@ int main(int argv, char **argc)
 	if(parts[1] != NULL)
 	  free(parts[1]);
 
-	parts[1] = parts_buffer[1];
-	
+        parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
+	memcpy(parts[1], parts_buffer[1], buffer_npart, sizeof(PARTS));
+	free(parts_buffer[1]);	
+
 	/* now reallocate the halo structs and map back the particles into their respective halos */
         alloc_halos(1);
         halo_particle_mapping(1);
@@ -749,6 +751,17 @@ int load_balance(int isimu)
 	fprintf(stderr, "\nDone load balancing.\nTask=%d has %"PRIu64" halos and %"PRIu64" particles, size=%zd.\n", 
 		LocTask, nHalos[isimu], nPart[isimu], totHaloSizeTest);
 #endif
+
+  if(LocTask < NReadTask && nRecvTasks[LocTask]>0)
+  {
+     for(ihalo=0; ihalo<nRecvTasks[ThisTask]; ihalo++)
+       free(haloBuffer[ihalo]);
+     
+     free(haloBuffer);
+     free(sizeBuffer);
+     free(haloSendBuffer);
+     free(nHalosBuffer);
+  }
 
   return(1);
 }
