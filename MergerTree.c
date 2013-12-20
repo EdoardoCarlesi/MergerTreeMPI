@@ -175,6 +175,8 @@ int main(int argv, char **argc)
   char   *partList;		// This file contains all the files to be submitted to task 0 
   char   *prefixOut;
 
+  parts_buffer[1]=NULL;
+
   /* local variables */
   uint64_t buffer_npart;	// Buffer to recieve the new total number of particles
   uint64_t buffer_nhalo;	// Buffer to recieve the new total number of halos
@@ -342,7 +344,8 @@ int main(int argv, char **argc)
 #endif
  
 	/* allocate on LocTask a buffer to recieve parts data from SendTask */
-        parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
+       if(parts_buffer[1]!=NULL) free(parts_buffer); 
+       parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
 
 	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
 	  MPI_Sendrecv(parts[1], nPart[1] * sizeof(PARTS), MPI_BYTE, RecvTask, 0, 
@@ -359,10 +362,10 @@ int main(int argv, char **argc)
 	/* free the old pointer and set it equal to the new one */
 	if(parts[1] != NULL)
 	  free(parts[1]);
-
-        parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
-	memcpy(parts[1], parts_buffer[1], buffer_npart, sizeof(PARTS));
-	free(parts_buffer[1]);	
+	parts[1] = parts_buffer[1];
+        //parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
+	//memcpy(parts[1], parts_buffer[1], buffer_npart * sizeof(PARTS));
+	//free(parts_buffer[1]);	
 
 	/* now reallocate the halo structs and map back the particles into their respective halos */
         alloc_halos(1);
@@ -755,7 +758,7 @@ int load_balance(int isimu)
 
   if(LocTask < NReadTask && nRecvTasks[LocTask]>0)
   {
-     for(ihalo=0; ihalo<nRecvTasks[ThisTask]; ihalo++)
+     for(ihalo=0; ihalo<nRecvTasks[LocTask]; ihalo++)
        free(haloBuffer[ihalo]);
      
      free(haloBuffer);
