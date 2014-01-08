@@ -756,6 +756,7 @@ int load_balance(int isimu)
 		LocTask, nHalos[isimu], nPart[isimu], totHaloSizeTest);
 #endif
 
+  /* Now free local buffers */
   if(LocTask < NReadTask && nRecvTasks[LocTask]>0)
   {
      for(ihalo=0; ihalo<nRecvTasks[LocTask]; ihalo++)
