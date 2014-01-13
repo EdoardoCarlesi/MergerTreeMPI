@@ -46,7 +46,8 @@
 //#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
 //#define USE_LINENUMBER_AS_HALOID      // do not use the haloid as found in _particles
 //#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
-//#define DEBUG
+
+#define DEBUG_MPI
 
 #define NUM_OMP_THREADS 2
 
@@ -315,7 +316,7 @@ int main(int argv, char **argc)
 
       if(LocTask == 0)
         fprintf(stderr, "Cross correlation completed step %d/%d of file %d in %ld sec, total elapsed time=%ld.\n", 
-	  LocTask, jchunk+1, TotTask, jfile, elapsed, total);
+	        jchunk+1, TotTask, jfile, elapsed, total);
 
       elapsed = (time_t) 0;
 
