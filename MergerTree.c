@@ -313,7 +313,7 @@ int main(int argv, char **argc)
       total += elapsed;
 
       if(LocTask == 0)
-        fprintf(stderr, "Cross correlation completed step %d/%d of file %d in %ld sec, total elapsed time=%ld.\n", 
+        fprintf(stderr, "Cross correlation completed step %d/%d of file %d in %ld sec, total elapsed time is %ld s.\n", 
 	        jchunk+1, TotTask, jfile, elapsed, total);
 
       elapsed = (time_t) 0;
@@ -972,8 +972,8 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-   fprintf(stderr," done in %ld sec, temp num halos=%"PRIu64", total temp halo size=%zd MB.\n", 
-		elapsed, nHalosTmp[isimu], totHaloSize/1024/1024); 
+   fprintf(stderr,"\n done in %ld sec, temp num halos=%"PRIu64", total temp halo size=%zd kb.\n", 
+		elapsed, nHalosTmp[isimu], totHaloSize/1024); 
 
   return(1);
 }
@@ -1039,7 +1039,7 @@ int particle_halo_mapping(int isimu)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-    fprintf(stderr," done in %ld sec.\n",elapsed);
+    fprintf(stderr,"\n done in %ld sec.\n",elapsed);
   return(1);
 }
 
@@ -1094,7 +1094,7 @@ int halo_particle_mapping(int isimu)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-   fprintf(stderr," done in %ld sec.\n",elapsed);
+   fprintf(stderr,"\n done in %ld sec.\n",elapsed);
 
   return(1);
 }
@@ -1145,7 +1145,7 @@ int cross_correlation(int iloop)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-    fprintf(stderr," done in %ld sec.\n",elapsed);
+    fprintf(stderr,"\n done in %ld sec.\n",elapsed);
 
   return(1);
 }
@@ -1377,7 +1377,7 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
   elapsed += time(NULL);
 
    if(LocTask == 0)
-    fprintf(stderr," done in %ld sec.\n",elapsed);
+    fprintf(stderr,"\n done in %ld sec.\n",elapsed);
   return(1);
 }
 
@@ -1402,7 +1402,7 @@ int remove_network_connections(void)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-   fprintf(stderr," done in %ld sec.\n",elapsed);
+   fprintf(stderr,"\n done in %ld sec.\n",elapsed);
 
   return(1);
 }
