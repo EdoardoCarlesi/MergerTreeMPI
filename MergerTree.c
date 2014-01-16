@@ -47,7 +47,7 @@
 //#define USE_LINENUMBER_AS_HALOID      // do not use the haloid as found in _particles
 //#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
 
-#define DEBUG_MPI
+//#define DEBUG_MPI
 
 #define NUM_OMP_THREADS 2
 
@@ -62,7 +62,6 @@
 
 #define COUNTER 5000
 #define ORDER				// Order halos in merger tree by merit function
-//#define DEBUG_MPI
 
 
 /*-------------------------------------------------------------------------------------
@@ -170,8 +169,7 @@ void 	check_halos			(int isimu);
  *==================================================================================================*/
 int main(int argv, char **argc)
 {
-  int    ifile, jfile, jchunk, count, nFiles;   // nFiles is now the total number of files to be read by a single task. Each task
-				// loads in one _particle file per redshift.
+  int    ifile, jfile, jchunk, count, nFiles;   // nFiles is the number of snapshots (composed of several chunks)
   char   *tempDir;		// Temporary files are stored here - to be cleaned at the end of the run
   char   *partList;		// This file contains all the files to be submitted to task 0 
   char   *prefixOut;
@@ -345,7 +343,6 @@ int main(int argv, char **argc)
 #endif
  
 	/* allocate on LocTask a buffer to recieve parts data from SendTask */
-       if(parts_buffer[1]!=NULL) free(parts_buffer); 
        parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
 
 	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
@@ -363,10 +360,8 @@ int main(int argv, char **argc)
 	/* free the old pointer and set it equal to the new one */
 	if(parts[1] != NULL)
 	  free(parts[1]);
+
 	parts[1] = parts_buffer[1];
-        //parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
-	//memcpy(parts[1], parts_buffer[1], buffer_npart * sizeof(PARTS));
-	//free(parts_buffer[1]);	
 
 	/* now reallocate the halo structs and map back the particles into their respective halos */
         alloc_halos(1);
@@ -440,6 +435,7 @@ int main(int argv, char **argc)
     printf("finished\n");
 
   MPI_Finalize();
+
   return(1);
 }
 
@@ -490,6 +486,10 @@ int load_balance(int isimu)
 
   nTaskPerSend = (int) DeltaTask / NReadTask;
   extraTask = DeltaTask % NReadTask;
+
+  if(LocTask == 0)
+    fprintf(stderr, "Load balancing from %d ReadTasks on %d TotalTasks, each SendTask has %d RecvTasks\n.",
+             NReadTask, TotTask, nTaskPerSend);
 
   /* we figure out who is sending to how many tasks */ 
   if(LocTask < NReadTask)
@@ -972,7 +972,8 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   elapsed += time(NULL);
 
   if(LocTask == 0)
-   fprintf(stderr," done in %ld sec, nHalosTmp=%"PRIu64", totHaloSizeTmp=%zd\n", elapsed, nHalosTmp[isimu], totHaloSize); 
+   fprintf(stderr," done in %ld sec, temp num halos=%"PRIu64", total temp halo size=%zd MB.\n", 
+		elapsed, nHalosTmp[isimu], totHaloSize/1024/1024); 
 
   return(1);
 }
@@ -1536,19 +1537,13 @@ int add_halos(int ifile, int isimu)
      halos[isimu][ihalo].haloid = halos_tmp[isimu][ihalo-min_halo].haloid;
      sizeHalo = nparts * sizeof(uint64_t);
 
-//     fprintf(stderr, "Task=%d] MinHalo=%"PRIu64" MaxHalo=%"PRIu64" Npart=%"PRIu64" Nloop=%"PRIu64"\n", 
-//	LocTask, min_halo, nHalos[isimu], nparts, ihalo);
-
-//     halos[isimu][ihalo].Pid = halos_tmp[isimu][ihalo].Pid;
-//     halos[isimu][ihalo].Pindex = halos_tmp[isimu][ihalo].Pindex;
-
      halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeHalo);
      halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeHalo);
 
      memcpy(halos[isimu][ihalo].Pid, halos_tmp[isimu][ihalo-min_halo].Pid, sizeHalo);   
      memcpy(halos[isimu][ihalo].Pindex, halos_tmp[isimu][ihalo-min_halo].Pindex, sizeHalo);
 
-     /* release the memory as the particles are copied */
+     /* free temp memory as the particles are copied */
      free(halos_tmp[isimu][ihalo-min_halo].Pindex);
      free(halos_tmp[isimu][ihalo-min_halo].Pid);
   }
@@ -1613,14 +1608,11 @@ void intersection(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64
     
 }
 
-
-
 /* This function is called by qsort() and bsearch() needed for the matching of the particles */
 int cmpfunc(const void * a, const void * b)
 {
    return ( *(int*)a - *(int*)b );
 }
-
 
 /* construct a unique haloid based upon line number (=ihalo) and MPI_rank */
 uint64_t constructHaloId(uint64_t ihalo)
