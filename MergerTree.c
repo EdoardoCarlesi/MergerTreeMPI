@@ -143,6 +143,7 @@ int      write_mtree            (int isimu0, char OutFile[MAXSTRING]);
 uint64_t max_merit              (uint64_t ihalo, int isimu);
 
 int	 assign_input_files_to_tasks	(char *partList, char *tempDir, char ***locPartFile, int nFiles);
+int	 assign_output_files_names	(char *outList, char **outSuffix, int nFiles);
 int 	 cmpfunc			(const void * a, const void * b); 
 int	 add_halos			(int ifile, int isimu);
 int      alloc_halos			(int isimu);
@@ -171,6 +172,7 @@ int main(int argv, char **argc)
 {
   int    ifile, jfile, jchunk, count, nFiles;   // nFiles is the number of snapshots (composed of several chunks)
   char   *tempDir;		// Temporary files are stored here - to be cleaned at the end of the run
+  char   *outList;		// List of snapshots file numbers, _??? format
   char   *partList;		// This file contains all the files to be submitted to task 0 
   char   *prefixOut;
 
@@ -179,8 +181,9 @@ int main(int argv, char **argc)
   /* local variables */
   uint64_t buffer_npart;	// Buffer to recieve the new total number of particles
   uint64_t buffer_nhalo;	// Buffer to recieve the new total number of halos
-  time_t    elapsed = (time_t)0, total = (time_t) 0;
+  time_t   elapsed = (time_t)0, total = (time_t) 0;
 
+  char   **outSuffix=NULL; 		// Suffix numbers to the particle files
   char   ***locPartFile=NULL;		// Each task stores _particle urls here
   char   **locOutFile=NULL;		// Each task will dump to this file
 
@@ -192,6 +195,7 @@ int main(int argv, char **argc)
   partList = argc[count++];	   
   prefixOut = argc[count++];
   tempDir = argc[count++];
+  outList = argc[count++];
 
 #ifdef DEBUG_MPI
   /* check that the global variables have been read correctly */
@@ -226,6 +230,7 @@ int main(int argv, char **argc)
   /* allocate memory for locOutFiles, each of size MAXSTRING */
   locOutFile  = (char **) calloc(nFiles, sizeof(char *));
 
+
   for(ifile=0; ifile<nFiles; ifile++)
     locOutFile[ifile]  = (char *) calloc(MAXSTRING, sizeof(char));
 
@@ -252,6 +257,8 @@ int main(int argv, char **argc)
 
      /* now assign a list of urls to every task and alloc local memory */
      assign_input_files_to_tasks(partList, tempDir, locPartFile, nFiles);
+     assign_output_files_names(outList, outSuffix, nFiles);
+
   
      /* read particles now reads into the tmp file which is reallocated in the main halos struct */
      for(ifile=0; ifile<filesPerTask; ifile++)
@@ -274,7 +281,7 @@ int main(int argv, char **argc)
   /* now loop over all files */
   for(ifile=0; ifile<nFiles-1; ifile++)
   {
-    sprintf(locOutFile[ifile], "%s_%03d-%03d.%04d", prefixOut, ifile, ifile+1, LocTask); 
+    sprintf(locOutFile[ifile], "%s_%s-%s.%04d", prefixOut, outSuffix[ifile], outSuffix[ifile+1], LocTask); 
 
     /* every task reads the next file into memory - the next file should be a chunk of _particle files
        at a different redshift */
@@ -830,6 +837,34 @@ int assign_input_files_to_tasks(char *partList, char *tempDir, char ***locPartFi
 
   if(LocTask == 0)
     fprintf(stderr, " done.\n");
+
+  return(1);
+}
+
+
+
+int assign_output_files_names(char *outList, char **outSuffix, int nFiles)
+{
+  FILE *locOutListFile;
+  int ifile=0;
+  char dummy[MAXSTRING-1];
+
+    locOutListFile = fopen(outList, "r");
+    outSuffix = (char **) calloc(nFiles, sizeof(char *));
+
+      for(ifile=0; ifile<nFiles; ifile++)
+      {
+        fgets(dummy, MAXSTRING-1, locOutListFile);
+        outSuffix[ifile] = (char*) calloc(strlen(dummy)+5, sizeof(char));
+        strcpy(outSuffix[ifile], dummy);
+        outSuffix[ifile][strlen(dummy)-1]='\0';
+#ifdef DEBUG_MPI
+//        fprintf(stderr, "Task=%d will out from file %s\n", LocTask, locPartFile[ifile][jfile]);
+#endif
+      }
+
+      /* close the temp file generated with the list of the files to be read */
+      fclose(locOutListFile);
 
   return(1);
 }
