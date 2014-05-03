@@ -2,7 +2,7 @@
 
 # N_proc sets the number of mpi tasks
 N_proc=4
-N_read=4
+N_read=1
 
 # AHF settings
 home_dir='/home/carlesi/'
@@ -18,7 +18,7 @@ temp_part=$mtree'/temp/list_part_files.ahf'
 temp_halo=$mtree'/temp/list_halo_files.ahf'
 
 temp_out=$mtree'/temp/list_files_numbers.ahf'
-base_out=$mtree'/CATALOGUES/snapshot_0'
+base_out=$mtree'/clues/4096'
 
 # List two catalogues to test the serial version
 in_1='/home/carlesi/MERGER_TREE/CATALOGUES/merged_030.AHF_particles'
@@ -26,10 +26,13 @@ in_2='/home/carlesi/MERGER_TREE/CATALOGUES/merged_031.AHF_particles'
 base_in='/home/carlesi/MERGER_TREE/CATALOGUES/64/merged_'
 out=$output'/test_full_30-31.mtr'
 
-ls -r $base_out*0000*particles > $temp_part
-ls -r $base_out*0000*halos > $temp_halo
-ls -r $base_out*0000*particles | grep -o '_0[0-9][0-9]' > $temp_out
-#ls $base_out*0000*particles > $temp
+#ls -r $base_out*0000*particles > $temp_part
+#ls -r $base_out*0000*halos > $temp_halo
+#ls -r $base_out*0000*particles | grep -o '_0[0-9][0-9]' > $temp_out
+
+ls -r $base_out*particles > $temp_part
+ls -r $base_out*halos > $temp_halo
+ls -r $base_out*particles | grep -o '_0[0-9][0-9]' > $temp_out
 
 #echo cd $ahf
 cd $ahf

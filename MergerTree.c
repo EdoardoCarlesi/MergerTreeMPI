@@ -47,7 +47,7 @@
 //#define USE_LINENUMBER_AS_HALOID      // do not use the haloid as found in _particles
 //#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
 
-#define DEBUG_MPI
+//#define DEBUG_MPI
 
 #define NUM_OMP_THREADS 2
 
@@ -64,7 +64,7 @@
 #define COUNTER 5000
 #define ORDER				// Order halos in merger tree by merit function
 
-#define MAX_HALO_DIST 5 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
+#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -299,8 +299,8 @@ int main(int argv, char **argc)
   /* now loop over all files */
   for(ifile=0; ifile<nFiles-1; ifile++)
   {
-	fprintf(stderr, "prefix = %s \n", prefixOut);
-	fprintf(stderr, "suffix = %s \n", outSuffix[ifile]);
+//	fprintf(stderr, "prefix = %s \n", prefixOut);
+//	fprintf(stderr, "suffix = %s \n", outSuffix[ifile]);
 
     sprintf(locOutFile[ifile], "%s_%s-%s.%04d", prefixOut, outSuffix[ifile], outSuffix[ifile+1], LocTask); 
 
@@ -1335,7 +1335,7 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
   for(khalo=0; khalo<nHalos[isimu1]; khalo++) 
   {
     /* Only take into account pairs of haloes closer than MAX_HALO_DIST*/
-    if (compute_com_distance(ihalo, khalo) < MAX_HALO_DIST)
+//    if (compute_com_distance(ihalo, khalo) < MAX_HALO_DIST)
        intersection(isimu0, isimu1, ihalo, khalo, common);
   }
 
@@ -1558,7 +1558,7 @@ double compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
 
     Dist = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
 
-  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
+//  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
 
   return Dist;
 }
