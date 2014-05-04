@@ -64,7 +64,8 @@
 #define COUNTER 5000
 #define ORDER				// Order halos in merger tree by merit function
 
-#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
+//#define DISABLE_MAX_HALO_DISTANCE
+//#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -120,6 +121,8 @@ uint64_t    nPartTmp[2];
 size_t      totHaloSize;	// when reading-in the halo keep track of its size including dynamically allocated mem
 size_t      totHaloSizeTmp;	
 
+double BoxSize; 	// Needed for periodic boundary conditions
+
 int NReadTask;		// NReadTask is the number of tasks reading the files
 int TotTask; 
 int LocTask; 
@@ -146,7 +149,7 @@ int      create_mtree           (uint64_t ihalo, int isimu0, int isimu1, int ilo
 int      clean_connection       (uint64_t ihalo, int isimu0, int isimu1);
 int      write_mtree            (int isimu0, char OutFile[MAXSTRING]);
 uint64_t max_merit              (uint64_t ihalo, int isimu);
-double   compute_com_distance   (uint64_t ihalo0, uint64_t ihalo1);
+int      compute_com_distance	(uint64_t ihalo0, uint64_t ihalo1);
 
 int	 assign_input_files_to_tasks	(char *partList, char *haloList, char *tempDir, char ***locPartFile, 
 					 char ***locHaloFile, int nFiles);
@@ -206,6 +209,7 @@ int main(int argv, char **argc)
   outList = argc[count++];
   partList = argc[count++];	   
   haloList = argc[count++];	   
+  BoxSize = atof(argc[count++]);	   
 
 #ifdef DEBUG_MPI
   /* check that the global variables have been read correctly */
@@ -441,7 +445,6 @@ int main(int argv, char **argc)
     if(LocTask == 0)
       fprintf(stderr,"\nCleaning up ...\n");
 
-#ifdef TEST
   free_halos(0);
   if(parts[0] != NULL) free(parts[0]);
 
@@ -450,12 +453,11 @@ int main(int argv, char **argc)
   if(LocTask < NReadTask)
   {
     for(jfile=0; jfile<filesPerTask; jfile++)
-      for(ifile=0; ifile<nFiles; ifile++)
      {
-        if(locPartFile[jfile][ifile]) free(locPartFile[jfile][ifile]);
+        if(locPartFile[jfile]) free(locPartFile[jfile]);
          if(locPartFile) free(locPartFile);
 
-        if(locHaloFile[jfile][ifile]) free(locHaloFile[jfile][ifile]);
+        if(locHaloFile[jfile]) free(locHaloFile[jfile]);
          if(locHaloFile) free(locHaloFile);
      }
   }
@@ -468,7 +470,6 @@ int main(int argv, char **argc)
 
   if(LocTask == 0)
     printf("finished\n");
-#endif /*  TEST */
 
   MPI_Finalize();
 
@@ -606,7 +607,6 @@ int load_balance(int isimu)
          partPerTask[irecv] += locNPart;
 
 #endif
-
 
       /* Each halo holds two uint64_t and two arrays Pid and Pindex */
       sizeTempBuffer = 2 * sizeUInt64 * (halos[isimu][jhalo].npart + 1) + 3 * sizeof(double);
@@ -1109,6 +1109,7 @@ int read_positions(char filename[MAXSTRING], int isimu)
   /* for AHF_halos files the first line is the header which we can happily ignore */
   do {
      if(strncmp(line,"#",1) != 0)
+     {
        sscanf(line,"%"SCNu64" %"SCNu64" %d %lf %d %lf %lf %lf", 
 	&ID_dummy, &Host_dummy, &Nsub_dummy, &Mvir_dummy, &Npart_dummy, &Xc, &Yc, &Zc);
        
@@ -1116,7 +1117,11 @@ int read_positions(char filename[MAXSTRING], int isimu)
           halos_tmp[isimu][ihalo].Xc[1] = Yc;
           halos_tmp[isimu][ihalo].Xc[2] = Zc;
 
+       fprintf(stderr,"Task=%d) %llu %llu %d %e %d %lf %lf %lf\n", LocTask,
+	ID_dummy, Host_dummy, Nsub_dummy,Mvir_dummy, Npart_dummy, Xc, Yc, Zc);
+
 	ihalo++;
+    }
   } while( fgets(line,MAXSTRING,fpin) != NULL);
  
   fclose(fpin);
@@ -1246,7 +1251,7 @@ int halo_particle_mapping(int isimu)
       halos[isimu][ihalo].Pidord = calloc(nparts, sizeof(uint64_t));
       memcpy(halos[isimu][ihalo].Pidord, halos[isimu][ihalo].Pid, nparts * sizeof(uint64_t));   
       qsort(halos[isimu][ihalo].Pidord, nparts, sizeof(uint64_t), &cmpfunc);
-  }
+   }
 
   elapsed += time(NULL);
 
@@ -1335,7 +1340,9 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
   for(khalo=0; khalo<nHalos[isimu1]; khalo++) 
   {
     /* Only take into account pairs of haloes closer than MAX_HALO_DIST*/
-//    if (compute_com_distance(ihalo, khalo) < MAX_HALO_DIST)
+#ifndef DISABLE_MAX_HALO_DISTANCE
+    if (compute_com_distance(ihalo, khalo) == 1)
+#endif
        intersection(isimu0, isimu1, ihalo, khalo, common);
   }
 
@@ -1545,9 +1552,11 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
 /* Computes the distance of the center of mass of two given halos. If their distance is larger than MAX
    then the comparison will be skipped. Assumes kpc units.
  */
-double compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
+int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
 {
-  double Dist, Xc0, Xc1, Yc0, Yc1, Zc0, Zc1;
+  int Dist = 0;
+  double Xc0, Xc1, Yc0, Yc1, Zc0, Zc1;
+  double D0, D1, D2, D3, D4, D5, D6, D7;
 	
 	Xc0 = halos[0][ihalo0].Xc[0];
 	Xc1 = halos[1][ihalo1].Xc[0];
@@ -1556,9 +1565,25 @@ double compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
 	Zc0 = halos[0][ihalo0].Xc[2];
 	Zc1 = halos[1][ihalo1].Xc[2];
 
-    Dist = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+    D0 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+    D1 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+    D2 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1));
+    D3 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
+    D4 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
+    D5 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1 - BoxSize));
+    D6 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1));
+    D7 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1 - BoxSize));
 
 //  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
+
+	/* Check for periodic boundary conditions */
+   if( D0 < MAX_HALO_DIST || D1 < MAX_HALO_DIST || D2 < MAX_HALO_DIST 
+    || D3 < MAX_HALO_DIST || D4 < MAX_HALO_DIST || D5 < MAX_HALO_DIST 
+    || D6 < MAX_HALO_DIST || D7 < MAX_HALO_DIST )
+				Dist = 1;
+	else
+	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, 
+		Xc0, Xc1, Yc0, Yc1);
 
   return Dist;
 }

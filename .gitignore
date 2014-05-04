@@ -1,0 +1,16 @@
+latest_ahf/*
+CATALOGUES/*
+temp/*
+output/*
+MergerTree.c.*
+MergerTreeMPI*
+MergerTree
+clues/*
+*.bkp
+TEST/*
+test*
+old_*
+*.log
+*.out
+bkp/*
+files/*
