@@ -65,7 +65,7 @@
 #define ORDER				// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
+#define MAX_HALO_DIST 300 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -1117,8 +1117,8 @@ int read_positions(char filename[MAXSTRING], int isimu)
           halos_tmp[isimu][ihalo].Xc[1] = Yc;
           halos_tmp[isimu][ihalo].Xc[2] = Zc;
 
-       fprintf(stderr,"Task=%d) %llu %llu %d %e %d %lf %lf %lf\n", LocTask,
-	ID_dummy, Host_dummy, Nsub_dummy,Mvir_dummy, Npart_dummy, Xc, Yc, Zc);
+//       fprintf(stderr,"Task=%d) %llu %llu %d %e %d %lf %lf %lf\n", LocTask,
+//	ID_dummy, Host_dummy, Nsub_dummy,Mvir_dummy, Npart_dummy, Xc, Yc, Zc);
 
 	ihalo++;
     }
@@ -1581,9 +1581,10 @@ int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
     || D3 < MAX_HALO_DIST || D4 < MAX_HALO_DIST || D5 < MAX_HALO_DIST 
     || D6 < MAX_HALO_DIST || D7 < MAX_HALO_DIST )
 				Dist = 1;
-	else
-	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, 
-		Xc0, Xc1, Yc0, Yc1);
+
+//	else
+//	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, 
+//		Xc0, Xc1, Yc0, Yc1);
 
   return Dist;
 }

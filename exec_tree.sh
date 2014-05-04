@@ -2,13 +2,13 @@
 
 # N_proc sets the number of mpi tasks
 N_proc=4
-N_read=4
+N_read=1
 
-# Box size in Mpc
-BOX=50
+# Box size in Mpc (needed for the haloes at the box boundaries, for periodic boxes)
+BOX=64
 
 # Sim Type (0 = test multi snap, 1 = CLUES)
-sim_type=0
+sim_type=1
 
 # AHF settings
 home_dir='/home/carlesi/'
@@ -18,11 +18,16 @@ exec_serial=$home_dir'/AHF/ahf-v1.0-071/bin/MergerTree'
 
 # Merger Tree directories and catalogue path
 mtree=$home_dir'/MERGER_TREE/'
-output=$mtree'/output/mtree_nodist'
+
+# Output files directory + prefix
+output=$mtree'/output/mtree_dist03mpc'
+
+# Store temporary files
 temp_dir=$mtree'/temp/'
+
+# Where to dump the lists of the _halo and _particles files
 temp_part=$mtree'/temp/list_part_files.ahf'
 temp_halo=$mtree'/temp/list_halo_files.ahf'
-
 temp_out=$mtree'/temp/list_files_numbers.ahf'
 
 # List two catalogues to test the serial version
@@ -31,6 +36,7 @@ in_2='/home/carlesi/MERGER_TREE/CATALOGUES/merged_031.AHF_particles'
 base_in='/home/carlesi/MERGER_TREE/CATALOGUES/64/merged_'
 out=$output'/test_full_30-31.mtr'
 
+# If using multiple catalogues (local settings)
 if [ $sim_type -eq 0 ]
 then
 base_catalog=$mtree'/CATALOGUES/snapshot_'
@@ -44,7 +50,7 @@ then
 base_catalog=$mtree'/clues/4096'
 ls -r $base_catalog*particles > $temp_part
 ls -r $base_catalog*halos > $temp_halo
-ls -r $base_catalog*particles | grep -o '_0[0-9][0-9]' > $temp_out
+ls -r $base_catalog*particles | grep -o '_[0-9][0-9][0-9]' > $temp_out
 fi
 
 cd $ahf
