@@ -65,7 +65,7 @@
 #define ORDER				// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-//#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
+#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
