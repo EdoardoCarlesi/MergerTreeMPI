@@ -42,7 +42,7 @@
 #define MAX_PARENT_HALO 5	      // maximum number of haloes to which a particle can belong to
 #define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
 //#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
-//#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
+#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
 //#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
 //#define USE_LINENUMBER_AS_HALOID      // do not use the haloid as found in _particles
 //#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
@@ -1271,7 +1271,7 @@ int halo_particle_mapping(int isimu)
 int cross_correlation(int iloop)
 {
   uint64_t  ihalo, count=COUNTER;
-  time_t   elapsed = (time_t)0;
+  clock_t   elapsed = (time_t)0;
   
   /*---------------------------------------------------------
    * backwards correlation
@@ -1285,7 +1285,7 @@ int cross_correlation(int iloop)
    fprintf(stderr, "\ncreating mtree for %"PRIu64" haloes on task %d\n", nHalos[0], LocTask);
 #endif 
 
-  elapsed -= time(NULL);
+  elapsed = clock();
   /* cross-correlation simu0->simu1. When creating the m_tree now we need to 
    * take into account that simu1 is split in TotTask files, and we now are
    * creating the m_tree for the iLoop-th one
@@ -1304,10 +1304,44 @@ int cross_correlation(int iloop)
         }
  }
 
-  elapsed += time(NULL);
+  elapsed = clock()-elapsed;
 
   if(LocTask == 0)
-    fprintf(stderr,"\n done in %ld sec.\n",elapsed);
+	  fprintf(stderr," done in %4.2f sec. Now doing it the other way\n", (double)elapsed/CLOCKS_PER_SEC);
+  
+#ifdef MTREE_BOTH_WAYS
+  
+  /*---------------------------------------------------------
+   * forward correlation
+   *---------------------------------------------------------*/
+  elapsed = clock();
+  fprintf(stderr,"  o generating cross-correlation 1->0 for %"PRIu64" haloes ...",nHalos[1]);
+#ifdef WITH_OPENMP
+#  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
+#endif
+  /* cross-correlation simu0<-simu1 */
+  for(ihalo=0; ihalo<nHalos[1]; ihalo++) {
+    create_mtree(ihalo, 1, 0, iloop);
+  }
+  elapsed = clock()-elapsed;
+  fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
+  
+  
+  
+  elapsed = clock();
+  fprintf(stderr,"  o removing network connections ...");
+#ifdef WITH_OPENMP2
+#  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
+#endif
+  /* clean connections simu0->simu1 */
+  for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
+    clean_connection(ihalo, 0, 1);
+  }
+  elapsed = clock()-elapsed;
+  fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
+  
+#endif // MTREE_BOTH_WAYS
+
 
   return(1);
 }

@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Use serial (1) mpi version (any other number)
+use_serial=1
+
 # N_proc sets the number of mpi tasks
 N_proc=4
 N_read=1
@@ -30,12 +33,6 @@ temp_part=$mtree'/temp/list_part_files.ahf'
 temp_halo=$mtree'/temp/list_halo_files.ahf'
 temp_out=$mtree'/temp/list_files_numbers.ahf'
 
-# List two catalogues to test the serial version
-in_1='/home/carlesi/MERGER_TREE/CATALOGUES/merged_030.AHF_particles'
-in_2='/home/carlesi/MERGER_TREE/CATALOGUES/merged_031.AHF_particles'
-base_in='/home/carlesi/MERGER_TREE/CATALOGUES/64/merged_'
-out=$output'/test_full_30-31.mtr'
-
 # If using multiple catalogues (local settings)
 if [ $sim_type -eq 0 ]
 then
@@ -64,15 +61,28 @@ more $temp_part
 n_files=`wc -l < $temp_part`
 echo $n_files
 
+if [ $use_serial -eq 1 ]
+then
+
+# List two catalogues to test the serial version
+in_1='/home/carlesi/MERGER_TREE/CATALOGUES/merged_031.AHF_particles'
+in_2='/home/carlesi/MERGER_TREE/CATALOGUES/merged_030.AHF_particles'
+in_3='/home/carlesi/MERGER_TREE/CATALOGUES/merged_029.AHF_particles'
+base_in='/home/carlesi/MERGER_TREE/CATALOGUES/64/merged_'
+out=$output'/test_full_30-31.mtr'
+
 # Execute the serial version of MergerTree
-#echo $in_1 
-#echo $in_2 
-#echo $out
-#ls $base_in*
-#$exec_serial
+echo $in_1 
+echo $in_2 
+echo $out
+ls $base_in*
+$exec_serial
+
+else 
 
 # Parallel executable
 echo '*******************' 
 echo mpiexec -n $N_proc $executable $N_read $n_files $output $temp_dir $temp_out $temp_part $temp_halo $BOX
 echo '*******************' 
 mpiexec.openmpi -n $N_proc $executable $N_read $n_files $output $temp_dir $temp_out $temp_part $temp_halo $BOX
+fi
