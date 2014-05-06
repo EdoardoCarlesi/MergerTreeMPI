@@ -19,6 +19,10 @@
  *    1       12
  *    1        4    -> halo #1 in file1 shares particles with halos #2,12,4  in file2
  *       etc.
+ *	
+ * TODO:	- save memory in communication use two separated HALO + HALO_MPI structures 	
+ * 		- remove the Xc[3] from the part struct
+ *		- put a threshold on the min_num_part for each halo to be considered
  *
  *==================================================================================================*/
 
@@ -102,7 +106,7 @@ typedef struct HALO_MPI
   uint64_t  haloid;
   uint64_t  npart;
   double    Xc[3];		// C.o.m. position of the halo
-  uint64_t  global_ncroco;	// Global number - sums all the haloes swapped so far
+  uint64_t  ncroco;		// Global number - sums all the haloes swapped so far
   uint64_t  haloid_max_merit;		// ID of the descendant halo with max_merit
 }HALO_MPI;
 
@@ -207,6 +211,7 @@ int main(int argv, char **argc)
   uint64_t buffer_npart;	// Buffer to recieve the new total number of particles
   uint64_t buffer_nhalo;	// Buffer to recieve the new total number of halos
   time_t   elapsed = (time_t)0, total = (time_t) 0;
+  size_t   sizeHaloMpi; 	// Size of the struct HALO_MPI minus the size of ncroco
 
   char   **outSuffix=NULL; 		// Suffix numbers to the particle files
   char   ***locPartFile=NULL;		// Each task stores _particle urls here
@@ -515,15 +520,25 @@ int main(int argv, char **argc)
 	order_by_merit(1);
 	mtree_tmp[1] = (MTREEptr *) calloc(nHalos[1], sizeof(MTREEptr));
 	halos_mpi[1] = (HALO_MPIptr *) calloc(nHalos[1], sizeof(HALOS_MPI));
- 
+	sizeHaloMpi = 3 * sizeof(double) + 2 * sizeof(uint64_t);
+
           for(ihalo = 0; ihalo < nHalos[1]; ihalo++)
 	  {
 		ncroco_simu[1] = halos[1][ihalo].global_ncroco;
 	      	mtree_tmp[1][ihalo] = (MTREEptr) calloc(1, sizeof(MTREE));
 		// Copy the first entry in the mtree, max_merit
-        	memcpy(&mtree_tmp[1][ihalo][0], &halos[1][ihalo].mtree[0], sizeof(MTREE)); 
-		halos_mpi[1] = 
+        	//memcpy(&mtree_tmp[1][ihalo][0], &halos[1][ihalo].mtree[0], sizeof(MTREE)); 
+		memcpy(&halos_mpi[1][ihalo].haloid, &halos[1][ihalo].haloid, sizeHaloMpi); 
+		halos_mpi[1][ihalo].ncroco = halos[1][ihalo].global_ncroco; 
+		halos_mpi[1][ihalo].haloid_max_merit = halos[1][ihalo].mtree[0].id[1]; 
+		
+		free(halos[1][ihalo].mtree);
 	  }
+
+	/* now that the data have been stored into HALO_MPI the halos[1] can be freed to leave room for the buffer */
+	free(halos[1]);	
+
+	halos_buffer[1] = (HALO_MPIptr *) calloc(nHalos[1], sizeof(HALOS_MPI));
 
 	/* First clean_connection simu0->simu1 using local data */ 
   	for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
@@ -533,7 +548,6 @@ int main(int argv, char **argc)
   /* now clean connections simu0->simu1 
    * we need to swap ALL halos and mtree_tmp in simu1 again for proper comparison...
    */
-
     for(jchunk=1; jchunk<TotTask; jchunk++)
     {
 	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
