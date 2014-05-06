@@ -1,29 +1,51 @@
 #!/bin/bash
 
-# Use serial (1) mpi version (any other number)
-use_serial=1
-
-# N_proc sets the number of mpi tasks
-N_proc=4
-N_read=1
-
-# Box size in Mpc (needed for the haloes at the box boundaries, for periodic boxes)
-BOX=64
-
-# Sim Type (0 = test multi snap, 1 = CLUES)
-sim_type=1
-
-# AHF settings
-home_dir='/home/carlesi/'
-ahf=$home_dir'/MERGER_TREE/latest_ahf/'
-executable=$ahf'/bin/MergerTree'
-exec_serial=$home_dir'/AHF/ahf-v1.0-071/bin/MergerTree'
-
 # Merger Tree directories and catalogue path
+home_dir='/home/carlesi/'
 mtree=$home_dir'/MERGER_TREE/'
 
-# Output files directory + prefix
-output=$mtree'/output/mtree_dist03mpc'
+# Use serial (1) mpi version (any other number)
+use_serial=0
+
+if [ $use_serial -eq 1 ]
+then
+
+echo 'Using Serial MTree'
+
+exec_serial=$mtree'/bkp/ahf/bin/MergerTree'
+#exec_serial=$mtree'/bkp/ahf/bin/MergerTreeSerial'
+#exec_serial=$mtree'/bkp/ahf/bin/MergerTreeSerialNoBoth'
+#exec_serial=$mtree'/bkp/MergerTree_v0'
+
+# List two catalogues to test the serial version
+#in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_031.AHF_particles'
+#in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_030.AHF_particles'
+#in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_029.AHF_particles'
+in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_061.z0.000.AHF_particles'
+in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_060.z0.020.AHF_particles'
+in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_059.z0.041.AHF_particles'
+out=$mtree'output/serial_sussing_'
+#out=$mtree'output/serial_test_'
+
+# Execute the serial version of MergerTree
+echo $in_1 
+echo $in_2 
+echo $in_3 
+echo $out
+
+$exec_serial
+
+else 
+
+# N_proc sets the number of mpi tasks
+N_proc=1
+
+# Sim Type (0 = test multi snap, 1 = CLUES, 2 = SussingMT 2013)
+sim_type=2
+
+# AHF settings
+ahf=$home_dir'/MERGER_TREE/latest_ahf/'
+executable=$ahf'/bin/MergerTree'
 
 # Store temporary files
 temp_dir=$mtree'/temp/'
@@ -36,7 +58,16 @@ temp_out=$mtree'/temp/list_files_numbers.ahf'
 # If using multiple catalogues (local settings)
 if [ $sim_type -eq 0 ]
 then
-base_catalog=$mtree'/CATALOGUES/snapshot_'
+
+# Box size in mpc (needed for the haloes at the box boundaries, for periodic boxes)
+BOX=50000
+
+# Chunks of file
+N_read=4
+
+# Output files directory + prefix
+output=$mtree'/output/mtree_mpi'
+base_catalog=$mtree'/CATALOGUES/SmallSimu/snapshot_'
 ls -r $base_catalog*0000*particles > $temp_part
 ls -r $base_catalog*0000*halos > $temp_halo
 ls -r $base_catalog*0000*particles | grep -o '_0[0-9][0-9]' > $temp_out
@@ -44,41 +75,50 @@ fi
 
 if [ $sim_type -eq 1 ]
 then
+
+# Box size in kpc (needed for the haloes at the box boundaries, for periodic boxes)
+BOX=64000
+
+# Chunks of file
+N_read=1
+
+# Output files directory + prefix
+output=$mtree'/output/mtree_clues'
 base_catalog=$mtree'/clues/4096'
 ls -r $base_catalog*particles > $temp_part
 ls -r $base_catalog*halos > $temp_halo
 ls -r $base_catalog*particles | grep -o '_[0-9][0-9][0-9]' > $temp_out
 fi
 
-cd $ahf
-make MergerTree;
+if [ $sim_type -eq 2 ]
+then
+
+# Box size in kpc (needed for the haloes at the box boundaries, for periodic boxes)
+BOX=62500
+
+# Chunks of file
+N_read=1
+
+# Output files directory + prefix
+output=$mtree'/output/mtree_s2013_onetask_dist3mpc'
+base_catalog=$mtree'/CATALOGUES/SussingCatalogs/62.5_dm'
+ls -r $base_catalog*particles > $temp_part
+ls -r $base_catalog*halos > $temp_halo
+ls -r $base_catalog*particles | grep -o '_[0-9][0-9][0-9]' > $temp_out
+fi
+
 
 # Check the temporary files, n_files sets the number of files per catalogue to be read in by a single task
-echo $temp_halo
-more $temp_halo
-echo $temp_part
-more $temp_part
+#echo $temp_halo
+#more $temp_halo
+#echo $temp_part
+#more $temp_part
+
 n_files=`wc -l < $temp_part`
 echo $n_files
 
-if [ $use_serial -eq 1 ]
-then
-
-# List two catalogues to test the serial version
-in_1='/home/carlesi/MERGER_TREE/CATALOGUES/merged_031.AHF_particles'
-in_2='/home/carlesi/MERGER_TREE/CATALOGUES/merged_030.AHF_particles'
-in_3='/home/carlesi/MERGER_TREE/CATALOGUES/merged_029.AHF_particles'
-base_in='/home/carlesi/MERGER_TREE/CATALOGUES/64/merged_'
-out=$output'/test_full_30-31.mtr'
-
-# Execute the serial version of MergerTree
-echo $in_1 
-echo $in_2 
-echo $out
-ls $base_in*
-$exec_serial
-
-else 
+cd $ahf
+make MergerTree;
 
 # Parallel executable
 echo '*******************' 

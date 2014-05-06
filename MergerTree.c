@@ -40,15 +40,15 @@
 
 #define MINCOMMON       10            // we only cross-correlate haloes if they at least share MINCOMMON particles
 #define MAX_PARENT_HALO 5	      // maximum number of haloes to which a particle can belong to
-#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
+//#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
 //#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
 #define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
 //#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
-//#define USE_LINENUMBER_AS_HALOID      // do not use the haloid as found in _particles
-//#define MERGER_RATIO   0.25           // writes output that readily allows to find mergers
 
 //#define DEBUG_MPI
+//#define DEBUG_LOG
 
+#define	DEBUG
 #define NUM_OMP_THREADS 2
 
 #define IMPROVE_LB	// As the workload on each task depends on both the total number of particles and 
@@ -60,12 +60,14 @@
 #define LB_HALO_FAC 1.0
 #endif
 
+#define MOD(arg) sqrt((arg) * (arg))
+
 #define MAXSTRING 1024
 #define COUNTER 5000
-#define ORDER				// Order halos in merger tree by merit function
+//#define ORDER		// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 300 // Maximum c.o.m. distance between halos - if larger than this, comparion will be ignored (kpc)
+#define MAX_HALO_DIST 3000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -100,7 +102,7 @@ typedef struct PARTS
   uint64_t  Pid;				// This now stores the particle id corresponding to the indexed particle
   uint64_t  Hid[MAX_PARENT_HALO];		// Hid is the global halo id 
   uint64_t  Hindex[MAX_PARENT_HALO];		// Hid is the local halo position in halo[isimu][index]
-  double    Xc[3];				// TODO FIND A SMARTER WAY TO SEND THE C.o.M. INFORMATIONS!!!
+  double    Xc[3];				// TODO FIND A SMARTER WAY TO SEND THE C.o.M. INFORMATIONS FIXME !!!
 }PARTS;
 
 /*-------------------------------------------------------------------------------------
@@ -112,6 +114,10 @@ HALOptr halos_tmp[2];
 PARTptr parts[2];
 PARTptr parts_buffer[2];	// on each task we need a buffer structure to save the incoming swapped particles
 
+#ifdef MTREE_BOTH_WAYS
+MTREEptr mtree_tmp[2]; 		// When doing the mtree both ways, we need to store the mtree for the 1->0, since
+				// simu 1 is the one which is being swapped through the tasks
+#endif
 
 uint64_t    nHalos[2];
 uint64_t    nHalosTmp[2];
@@ -133,10 +139,6 @@ int filesPerTask;
 int extraFilesPerTask;
 MPI_Status status;
 
-#ifdef MERGER_RATIO
-uint64_t nlines;  // number of lines in *_mtree file
-#endif
-
 /*-------------------------------------------------------------------------------------
  *                                 ALL THOSE FUNCTIONS
  *-------------------------------------------------------------------------------------*/
@@ -146,7 +148,7 @@ int      particle_halo_mapping  (int  isimu);
 int      halo_particle_mapping  (int  isimu);
 int      cross_correlation      (int  iloop); 
 int      create_mtree           (uint64_t ihalo, int isimu0, int isimu1, int iloop);
-int      clean_connection       (uint64_t ihalo, int isimu0, int isimu1);
+int      clean_connection       (uint64_t ihalo, int isimu0, int isimu1, int iloop);
 int      write_mtree            (int isimu0, char OutFile[MAXSTRING]);
 uint64_t max_merit              (uint64_t ihalo, int isimu);
 int      compute_com_distance	(uint64_t ihalo0, uint64_t ihalo1);
@@ -161,10 +163,6 @@ int      free_halos			(int isimu);
 int 	 load_balance			(int isimu); 
 void 	 intersection 			(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64_t *common);
 uint64_t constructHaloId(uint64_t ihalo);
-#ifdef MERGER_RATIO
-int  	 assign_progenitors	        (char OutFile[MAXSTRING]);
-void	 read_mtree             	(char *infile);
-#endif
 
 #ifdef DEBUG_MPI
 void 	check_parts			(int isimu);
@@ -300,15 +298,15 @@ int main(int argv, char **argc)
   if(LocTask == 0)
     fprintf(stderr,"\n\n\n\n\n");
 
+
   /* now loop over all files */
   for(ifile=0; ifile<nFiles-1; ifile++)
   {
 //	fprintf(stderr, "prefix = %s \n", prefixOut);
 //	fprintf(stderr, "suffix = %s \n", outSuffix[ifile]);
 
-    sprintf(locOutFile[ifile], "%s_%s-%s.%04d", prefixOut, outSuffix[ifile], outSuffix[ifile+1], LocTask); 
+    sprintf(locOutFile[ifile], "%s%s%s.%04d", prefixOut, outSuffix[ifile], outSuffix[ifile+1], LocTask); 
 
-//#ifdef TEST
     /* every task reads the next file into memory - the next file should be a chunk of _particle files
        at a different redshift */
   if(LocTask < NReadTask)
@@ -359,7 +357,7 @@ int main(int argv, char **argc)
       /* wait for all the processes to end the correlation */
       MPI_Barrier(MPI_COMM_WORLD);  
 
-#ifdef DEBUG_MPI
+#ifndef DEBUG_MPI
 	fprintf(stderr, "Task=%d is sending %"PRIu64" particles and %"PRIu64" halos to task=%d\n",
 	 		LocTask, nPart[1], nHalos[1], RecvTask);
 #endif
@@ -375,9 +373,13 @@ int main(int argv, char **argc)
 	fprintf(stderr, "Task=%d has recieved %"PRIu64" particles and %"PRIu64" halos from task=%d\n",
 	 		LocTask, buffer_npart, buffer_nhalo, SendTask);
 #endif
- 
+
+ 	// FIXME: why is this not working?
+	        //if(parts_buffer[1] != NULL) free(parts_buffer[1]); 
+		//	parts_buffer[1] = NULL;
+
 	/* allocate on LocTask a buffer to recieve parts data from SendTask */
-       parts_buffer[1] = (PARTS *) calloc(buffer_npart , sizeof(PARTS));
+        parts_buffer[1] = (PARTS *) calloc(buffer_npart, sizeof(PARTS));
 
 	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
 	  MPI_Sendrecv(parts[1], nPart[1] * sizeof(PARTS), MPI_BYTE, RecvTask, 0, 
@@ -391,34 +393,30 @@ int main(int argv, char **argc)
 	nPart[1] = buffer_npart;
 	nHalos[1] = buffer_nhalo;
 
+#ifdef DEBUG_MPI
+	fprintf(stderr, "Task= %d has received from task = %d a total of %llu haloes and %llu particles\n",
+		LocTask, SendTask, nHalos[1], nPart[1]);
+#endif
+
 	/* free the old pointer and set it equal to the new one */
 	if(parts[1] != NULL)
 	  free(parts[1]);
 
 	parts[1] = parts_buffer[1];
 
+	//MPI_Barrier(MPI_COMM_WORLD);
 	/* now reallocate the halo structs and map back the particles into their respective halos */
         alloc_halos(1);
         halo_particle_mapping(1);
 
-        MPI_Barrier(MPI_COMM_WORLD);  
-
-#ifdef MERGER_RATIO
-	// FIXME not tested for the MPI version
-      assign_progenitors(locOutFile[ifile]); //dumps information about progenitors
-#endif
-
+        //MPI_Barrier(MPI_COMM_WORLD);  
     } /* End swapping data */
 
 	write_mtree(0, locOutFile[ifile]);  
-  
+
     /* be verbose */
     if(LocTask == 0)
       fprintf(stderr,"  o making file 1 the new file 0 ...");
-
-     /* moves the mtree properties from file 0 to file 1 */ 
-     // FIXME not implemented for the MPI version
-     //remove_network_connections();
 
     /* remove halo[0] structs from memory */
     free_halos(0);
@@ -433,6 +431,7 @@ int main(int argv, char **argc)
     nPart[0]  = nPart[1];
     halos[0]  = halos[1];
     parts[0]  = parts[1];
+
     /* be verbose */
     if(LocTask == 0)
     fprintf(stderr," done\n");
@@ -445,24 +444,30 @@ int main(int argv, char **argc)
     if(LocTask == 0)
       fprintf(stderr,"\nCleaning up ...\n");
 
-  free_halos(0);
+    free_halos(0);
+
   if(parts[0] != NULL) free(parts[0]);
 
-  /* free input filename storage */
-
+  /* free input filenames */
   if(LocTask < NReadTask)
   {
-    for(jfile=0; jfile<filesPerTask; jfile++)
+     for(jfile=0; jfile<filesPerTask; jfile++)
      {
-        if(locPartFile[jfile]) free(locPartFile[jfile]);
-         if(locPartFile) free(locPartFile);
+        for(ifile=0; ifile<filesPerTask; ifile++)
+	{
+          if(locPartFile[jfile][ifile]) free(locPartFile[jfile][ifile]);
+          if(locHaloFile[jfile][ifile]) free(locHaloFile[jfile][ifile]);
+	}
 
-        if(locHaloFile[jfile]) free(locHaloFile[jfile]);
-         if(locHaloFile) free(locHaloFile);
+          if(locPartFile[jfile]) free(locPartFile[jfile]);
+          if(locHaloFile[jfile]) free(locHaloFile[jfile]);
      }
+
+     if(locPartFile) free(locPartFile);
+     if(locHaloFile) free(locHaloFile);
   }
 
-  /* free output filename storage*/
+  /* free output filenames */
   for(ifile=0; ifile<nFiles; ifile++)
     if(locOutFile[ifile])  free(locOutFile[ifile]);
 
@@ -903,7 +908,9 @@ int assign_input_files_to_tasks(char *partList, char *haloList, char *tempDir, c
 }
 
 
-
+/* 
+ * This functions assign to each task its corresponding output file.
+ */
 int assign_output_files_names(char *outList, char **outSuffix, int nFiles)
 {
   FILE *locOutListFile;
@@ -999,9 +1006,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
         haloid = constructHaloId((uint64_t)(ihalo+1)); // +1, because ihalo has not been incremented yet!
 
        }
-#ifdef USE_LINENUMBER_AS_HALOID
-      haloid = ihalo+1; // +1, because ihalo has not been incremented yet!
-#endif
       
       /* found yet another halo */
       ihalo++;
@@ -1217,7 +1221,6 @@ int halo_particle_mapping(int isimu)
 
   elapsed -= time(NULL);
 
-
   if(LocTask == 0)
     fprintf(stderr,"  o creating halo<->particle mapping for simu %d on task=%d...\n",isimu, LocTask);
 
@@ -1235,7 +1238,14 @@ int halo_particle_mapping(int isimu)
          halos[isimu][ihalo].Xc[0] = parts[isimu][ipart].Xc[0]; 
          halos[isimu][ihalo].Xc[1] = parts[isimu][ipart].Xc[1]; 
          halos[isimu][ihalo].Xc[2] = parts[isimu][ipart].Xc[2]; 
-
+ 
+#ifndef DEBUG_MPI
+  if(LocTask == 1 && halos[isimu][ihalo].haloid == 0)
+    	fprintf(stderr,"Task=%d at halo = %llu, npart=%llu, locn=%llu haloid=%llu IPART=%llu IDpart=%llu...\n", 
+		LocTask, jhalo, nPart[isimu], halos[isimu][ihalo].npart, halos[isimu][ihalo].haloid, 
+		ipart, parts[isimu][ipart].Pid);
+#endif
+ 
          halos[isimu][ihalo].Pid = (uint64_t *) realloc(halos[isimu][ihalo].Pid, locn*sizeof(uint64_t));
          halos[isimu][ihalo].Pindex = (uint64_t *) realloc(halos[isimu][ihalo].Pindex, locn*sizeof(uint64_t));
 
@@ -1305,20 +1315,21 @@ int cross_correlation(int iloop)
  }
 
   elapsed = clock()-elapsed;
+  
 
   if(LocTask == 0)
-	  fprintf(stderr," done in %4.2f sec. Now doing it the other way\n", (double)elapsed/CLOCKS_PER_SEC);
-  
+	  fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
+
 #ifdef MTREE_BOTH_WAYS
-  
+  if(LocTask == 0)
+	  fprintf(stderr," Merging it the other way\n");
+
   /*---------------------------------------------------------
    * forward correlation
    *---------------------------------------------------------*/
   elapsed = clock();
   fprintf(stderr,"  o generating cross-correlation 1->0 for %"PRIu64" haloes ...",nHalos[1]);
-#ifdef WITH_OPENMP
-#  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
-#endif
+
   /* cross-correlation simu0<-simu1 */
   for(ihalo=0; ihalo<nHalos[1]; ihalo++) {
     create_mtree(ihalo, 1, 0, iloop);
@@ -1326,22 +1337,21 @@ int cross_correlation(int iloop)
   elapsed = clock()-elapsed;
   fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
   
-  
-  
   elapsed = clock();
   fprintf(stderr,"  o removing network connections ...");
+
+  /* clean connections simu0->simu1 */
 #ifdef WITH_OPENMP2
 #  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
 #endif
-  /* clean connections simu0->simu1 */
+//  if(iloop == TotTask -1)
   for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
-    clean_connection(ihalo, 0, 1);
+    clean_connection(ihalo, 0, 1, iloop);
   }
   elapsed = clock()-elapsed;
-  fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
-  
-#endif // MTREE_BOTH_WAYS
+  fprintf(stderr," done in %4.2f sec\n", (double)elapsed/CLOCKS_PER_SEC);
 
+#endif // MTREE_BOTH_WAYS
 
   return(1);
 }
@@ -1360,17 +1370,18 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
    * the other tasks */
   if(iloop == 0)
   {
-    halos[isimu0][ihalo].mtree  = (MTREEptr) calloc(1,sizeof(MTREE)); 
+    halos[isimu0][ihalo].mtree  = (MTREEptr) calloc(1, sizeof(MTREE)); 
     halos[isimu0][ihalo].global_ncroco = 0;  
   }
   
   /* common[] records how many particles ihalo(isimu0) has in common with khalo(isimu1) */
   common = (uint64_t *) calloc(nHalos[isimu1], sizeof(uint64_t));
 
-
 /* use this custom linear algorithm to check for the matching particles */
+#ifdef WITH_OMP
   omp_set_num_threads(NUM_OMP_THREADS);
 #pragma omp parallel for private(khalo) shared(nHalos, common, ihalo, isimu0, isimu1)
+#endif
   for(khalo=0; khalo<nHalos[isimu1]; khalo++) 
   {
     /* Only take into account pairs of haloes closer than MAX_HALO_DIST*/
@@ -1387,7 +1398,7 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
       ncroco++;
   }
 
-  /* Update the number of connections found in total */
+  /* Update the number of connections found in total - ncroco only holds the LOCAL connections */
   halos[isimu0][ihalo].global_ncroco += ncroco; 
 
   /* does not make sense to continue if there are no cross-correlations */
@@ -1395,7 +1406,7 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
   {
     /* allocate memory for cross-correlations */
     halos[isimu0][ihalo].mtree  = 
-	(MTREEptr) realloc(halos[isimu0][ihalo].mtree, halos[isimu0][ihalo].global_ncroco * sizeof(MTREE)); 
+	(MTREEptr) realloc(halos[isimu0][ihalo].mtree, (halos[isimu0][ihalo].global_ncroco) * sizeof(MTREE)); 
   
     /* The halo[][].mtree for iloop>0 may already contain some connections to haloes 
      * so we need to initialize the variables */
@@ -1534,8 +1545,10 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
     else
       jhalo = ihalo;
 
-    if(halos[isimu0][jhalo].global_ncroco > 0) {
-      fprintf(fpout_idx,"%12"PRIu64" %12"PRIu64"\n", halos[isimu0][jhalo].mtree[0].haloid[0], halos[isimu0][jhalo].mtree[0].haloid[1]);
+    if(halos[isimu0][jhalo].global_ncroco > 0) 
+    {
+     fprintf(fpout_idx,"%12"PRIu64" %12"PRIu64"\n", 
+	halos[isimu0][jhalo].mtree[0].haloid[0], halos[isimu0][jhalo].mtree[0].haloid[1]);
       fflush(fpout_idx);
       
 #ifdef SUSSING2013
@@ -1600,13 +1613,16 @@ int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
 	Zc1 = halos[1][ihalo1].Xc[2];
 
     D0 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
-    D1 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+
+    D1 = sqrt( pow2(MOD(Xc0 - Xc1) - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+    D6 = sqrt( pow2(Xc0 - Xc1) + pow2(MOD(Yc0 - Yc1) - BoxSize) + pow2(Zc0 - Zc1));
+    D5 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(MOD(Zc0 - Zc1) - BoxSize));
+
     D2 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1));
-    D3 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
     D4 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
-    D5 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1 - BoxSize));
-    D6 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1));
     D7 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1 - BoxSize));
+
+    D3 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
 
 //  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
 
@@ -1616,66 +1632,45 @@ int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
     || D6 < MAX_HALO_DIST || D7 < MAX_HALO_DIST )
 				Dist = 1;
 
+		//if(Dist == 1 && D0 > MAX_HALO_DIST && D1 > MAX_HALO_DIST && D5 > MAX_HALO_DIST)
+/*		if(Dist == 1 && D0 > MAX_HALO_DIST)
+	fprintf(stderr, "Crossed Boundary Conditions h1=%llu h2=%llu x1=%lf x2=%lf y1=%lf y2=%lf z1=%lf z2=%lf\n", 
+		halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, Xc0, Xc1, Yc0, Yc1, Zc0, Zc1);
+*/	
 //	else
 //	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, 
-//		Xc0, Xc1, Yc0, Yc1);
 
   return Dist;
 }
 
 
 
-/*==================================================================================================
- * remove_network_connections
- *==================================================================================================*/
-int remove_network_connections(void)
-{
-  unsigned int ihalo;
-  time_t   elapsed = (time_t)0;
-
-  elapsed -= time(NULL);
-
-  if(LocTask == 0)
-    fprintf(stderr,"  o removing network connections");
-
-  /* clean connections simu0->simu1 */
-  for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
-    clean_connection(ihalo, 0, 1);
-  }
-  elapsed += time(NULL);
-
-  if(LocTask == 0)
-   fprintf(stderr,"\n done in %ld sec.\n",elapsed);
-
-  return(1);
-}
-
-
-/*==================================================================================================
- * clean_connection //FIXME
- *==================================================================================================*/
-int clean_connection(uint64_t ihalo, int isimu0, int isimu1)
+int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
 {
   uint64_t jhalo, icroco, ncroco_new;
   MTREE    *mtree;
 #ifdef DEBUG
   uint64_t idesc;
 #endif
-
+  
   /* count number of new crocos */
   ncroco_new = 0;
   mtree      = NULL;
-  
+
+  if (iloop == 0)
+  {
+     mtree_tmp[isimu0] = (MTREEptr) calloc(1, sizeof(MTREE));
+  }  
+
   /* loop over all cross-correlated haloes */
-  for(icroco=0; icroco<halos[isimu0][ihalo].global_ncroco; icroco++) {
+  for(icroco=0; icroco<halos[isimu0][ihalo].ncroco; icroco++) {
     jhalo = halos[isimu0][ihalo].mtree[icroco].id[1];
     
     /* check whether the present halo is the most likely descendant of this progenitor */
     if(max_merit(jhalo, isimu1) == ihalo) {
       // keep jhalo in mtree-list
       ncroco_new++;
-      mtree = (MTREEptr) realloc(mtree, ncroco_new*sizeof(MTREE));
-      
+      mtree = (MTREEptr) realloc(mtree, (ncroco_new+1)*sizeof(MTREE));
       mtree[ncroco_new-1].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
       mtree[ncroco_new-1].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
       mtree[ncroco_new-1].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
@@ -1692,7 +1687,7 @@ int clean_connection(uint64_t ihalo, int isimu0, int isimu1)
 #endif
     }
     else {
-      // remove jhalo from mtree-list and henc do not add it to the new mtree[] list
+      // remove jhalo from mtree-list and hence do not add it to the new mtree[] list
 #ifdef DEBUG
       fprintf(stderr,"icroco=%ld (of %ld) for ihalo=%ld: jhalo=%ld is NOT a real progenitor of ihalo=%ld (jhalo has %ld descendants)\n",
               icroco,halos[isimu0][ihalo].ncroco,ihalo,
@@ -1705,11 +1700,18 @@ int clean_connection(uint64_t ihalo, int isimu0, int isimu1)
     }
   } // for(icroco)
   
-  /* replace halos[isimu0][ihalo].mtree[] with new structure array */
-  if(halos[isimu0][ihalo].mtree) free(halos[isimu0][ihalo].mtree);
-  halos[isimu0][ihalo].mtree  = mtree;
 
-  return(1);
+  /* replace halos[isimu0][ihalo].mtree[] with new structure array on the last loop */
+  if (iloop == TotTask-1)
+  {
+    if(halos[isimu0][ihalo].mtree != NULL) {
+      free(halos[isimu0][ihalo].mtree);
+      halos[isimu0][ihalo].mtree = NULL;
+  }
+
+    halos[isimu0][ihalo].global_ncroco = ncroco_new;
+    halos[isimu0][ihalo].mtree = mtree;
+  }
 }
 
 /*==================================================================================================
@@ -1740,6 +1742,7 @@ int alloc_halos(int isimu)
   {
     halos[isimu][i].Pid = (uint64_t *) calloc(1, sizeof(uint64_t));
     halos[isimu][i].Pindex = (uint64_t *) calloc(1, sizeof(uint64_t));
+    halos[isimu][i].mtree = (MTREEptr *) calloc(1, sizeof(MTREE));
   }
 
   /* Init halo particle number to zero */
@@ -1817,7 +1820,8 @@ int free_halos(int isimu)
 
     if(halos[isimu][i].Pindex != NULL)
       free(halos[isimu][i].Pindex);
-
+    
+    if(isimu == 0)	// FIXME : does this make sense?
     if(halos[isimu][i].mtree != NULL)
       free(halos[isimu][i].mtree);
   }
@@ -1931,256 +1935,5 @@ void dump_log_halo(int isimu, int ihalo)
  
   fclose(log_halo);
 }
-#endif
-#endif
-
-#ifdef MERGER_RATIO
-/*==================================================================================================
- * assign_progenitors:
- *
- *  get statistics for multiple progenitors (e.g. mass ratios, etc.)
- *
- *  update 10/10/2007:
- *       each subhalo shares the most particles with its host :-(
- *       -> tried to fix this issue..
- *
- *==================================================================================================*/
-int assign_progenitors(char OutFile[MAXSTRING])
-{
-  FILE   *fpin, *fpout, *fpout_merger;
-  char    OutFile_mtree[MAXSTRING], OutFile_idx[MAXSTRING], OutFile_merger[MAXSTRING], line[MAXSTRING];
-  long unsigned   *id1, *npart1, *common, *id2, *npart2, *idx, iline;
-  double  xcommon, xnpart1, xnpart2, *ratio;
-  long    prev_id1, nprog, iprog;
-  
-  fprintf(stderr,"  o assigning progenitors ...");
-  
-  strcpy(OutFile_mtree, OutFile);
-  strcat(OutFile_mtree, "_mtree");
-  strcpy(OutFile_idx, OutFile_mtree);
-  strcat(OutFile_idx, "_progs");
-  strcpy(OutFile_merger, OutFile_mtree);
-  strcat(OutFile_merger, "_merger");
-  
-  /* open output file */
-  fpout = fopen(OutFile_idx,"w");
-  if(fpout == NULL)
-   {
-    fprintf(stderr,"could not open file %s\nexiting\n",OutFile_idx);
-    exit(0);
-   }
-  fprintf(fpout,"#id(1) Np(2) iprog1(3) Np1(4) ncommon1(5) iprog2(6) Np2(7) ncommon2(8) iprog3(9) Np3(10) ncommon3(11)\n");
-  
-  /* open output file */
-  fpout_merger = fopen(OutFile_merger,"w");
-  if(fpout_merger == NULL)
-   {
-    fprintf(stderr,"could not open file %s\nexiting\n",OutFile_merger);
-    exit(0);
-   }
-  fprintf(fpout_merger,"#id(1) iprog1(2) iprog2(3) common2/ncommon1(4)\n");
-
-  /* read *_mtree file */
-  read_mtree(OutFile);
-  
-  prev_id1  = mtree[0].id[0];  
-  nprog     = 0;
-  id1    = (long *) calloc(1, sizeof(long));
-  id2    = (long *) calloc(1, sizeof(long));
-  npart1 = (long *) calloc(1, sizeof(long));
-  npart2 = (long *) calloc(1, sizeof(long));
-  common = (long *) calloc(1, sizeof(long));
-  
-  for(iline=0; iline<nlines; iline++)
-   {
-    if(mtree[iline].id[0] == prev_id1)
-     {
-      /* make room for one more progenitor */
-      nprog++;
-      id1    = (long *) realloc(id1,    (nprog)*sizeof(long));
-      id2    = (long *) realloc(id2,    (nprog)*sizeof(long));
-      npart1 = (long *) realloc(npart1, (nprog)*sizeof(long));
-      npart2 = (long *) realloc(npart2, (nprog)*sizeof(long));
-      common = (long *) realloc(common, (nprog)*sizeof(long));
-      
-      /* copy information from mtree[] */
-      id1[nprog-1]    = mtree[iline].id[0];
-      id2[nprog-1]    = mtree[iline].id[1];
-      npart1[nprog-1] = mtree[iline].npart[0];
-      npart2[nprog-1] = mtree[iline].npart[1];
-      common[nprog-1] = mtree[iline].common;
-     }
-    else
-     {
-      ratio = (double *)        calloc(nprog+1, sizeof(double));
-      idx   = (long unsigned *) calloc(nprog+1, sizeof(long unsigned));
-      
-      for(iprog=0; iprog<nprog; iprog++)
-       {
-        /* calculate progenitor criterion */
-        xcommon          = (double)common[iprog];
-        xnpart1          = (double)npart1[iprog];
-        xnpart2          = (double)npart2[iprog];
-        ratio[iprog]     = pow2(xcommon)/(xnpart1*xnpart2);
-       }
-      /* sort all progenitor by merit function */
-      indexx(nprog, ratio-1, idx-1);
-      
-      /*-----------------------------------------------------
-       * dump information to file
-       *-----------------------------------------------------*/
-      if(nprog > 2)
-       {
-        fprintf(fpout,"%10ld %10ld       %10ld %10ld %10ld       %10ld %10ld %10ld       %10ld %10ld %10ld\n",
-                prev_id1,npart1[0],
-                id2[idx[nprog-1]-1],npart2[idx[nprog-1]-1],common[idx[nprog-1]-1],
-                id2[idx[nprog-2]-1],npart2[idx[nprog-2]-1],common[idx[nprog-2]-1],
-                id2[idx[nprog-3]-1],npart2[idx[nprog-3]-1],common[idx[nprog-3]-1]);
-        
-        /* iprog2 is most credible second progenitor */
-        if(id2[idx[nprog-1]-1]<id2[idx[nprog-2]-1] && id2[idx[nprog-2]-1]<id2[idx[nprog-3]-1])
-         {
-          if((double)common[idx[nprog-2]-1]/(double)common[idx[nprog-1]-1] > MERGER_RATIO)
-            fprintf(fpout_merger,"%10ld %10ld %10ld %16.8lf\n",
-                    prev_id1,id2[idx[nprog-1]-1],id2[idx[nprog-2]-1],
-                    (double)common[idx[nprog-2]-1]/(double)common[idx[nprog-1]-1]);
-         }
-        /* iprog3 is most credible second progenitor */
-        else if(id2[idx[nprog-1]-1]>id2[idx[nprog-2]-1] && id2[idx[nprog-2]-1]<id2[idx[nprog-3]-1])
-         {
-          if((double)common[idx[nprog-3]-1]/(double)common[idx[nprog-1]-1] > MERGER_RATIO)
-            fprintf(fpout_merger,"%10ld %10ld %10ld %16.8lf\n",
-                    prev_id1,id2[idx[nprog-1]-1],id2[idx[nprog-3]-1],
-                    (double)common[idx[nprog-3]-1]/(double)common[idx[nprog-1]-1]);
-         }
-        /* nothing else to do as only one real progenitor exists */
-       }
-      
-      else if (nprog > 1)
-       {
-        fprintf(fpout,"%10ld %10ld       %10ld %10ld %10ld       %10ld %10ld %10ld       -1 -1 -1\n",
-                prev_id1,npart1[0],
-                id2[idx[nprog-1]-1],npart2[idx[nprog-1]-1],common[idx[nprog-1]-1],
-                id2[idx[nprog-2]-1],npart2[idx[nprog-2]-1],common[idx[nprog-2]-1]);            
-
-        /* this indicates that the halo itself is a subhalo */
-        if(id2[idx[nprog-1]-1]>id2[idx[nprog-2]-1])
-         {
-          /* nothing to do as only one real progenitor exists */
-         }
-        else
-         {
-          /* iprog2 is most credible second progenitor */
-          if((double)common[idx[nprog-2]-1]/(double)common[idx[nprog-1]-1] > MERGER_RATIO)
-            fprintf(fpout_merger,"%10ld %10ld %10ld %16.8lf\n",
-                    prev_id1,id2[idx[nprog-1]-1],id2[idx[nprog-2]-1],
-                    (double)common[idx[nprog-2]-1]/(double)common[idx[nprog-1]-1]);
-         }
-       }
-      else
-       {
-        fprintf(fpout,"%10ld %10ld       %10ld %10ld %10ld       -1 -1 -1       -1 -1 -1\n",
-                prev_id1,npart1[0],
-                id2[idx[nprog-1]-1],npart2[idx[nprog-1]-1],common[idx[nprog-1]-1]);
-        
-        /* nothing else to do as there are no multiple progenitors */
-       }
-      
-      
-      free(ratio);
-      free(idx);
-      
-      /* start a new progenitor list */
-      free(id1);
-      free(id2);
-      free(npart1);
-      free(npart2);
-      free(common);
-      
-      nprog  = 1;
-      id1    = (long *) calloc(nprog, sizeof(long));
-      id2    = (long *) calloc(nprog, sizeof(long));
-      npart1 = (long *) calloc(nprog, sizeof(long));
-      npart2 = (long *) calloc(nprog, sizeof(long));
-      common = (long *) calloc(nprog, sizeof(long));
-      
-      id1[nprog-1]    = mtree[iline].id[0];
-      id2[nprog-1]    = mtree[iline].id[1];
-      npart1[nprog-1] = mtree[iline].npart[0];
-      npart2[nprog-1] = mtree[iline].npart[1];
-      common[nprog-1] = mtree[iline].common;
-      
-      prev_id1        = id1[nprog-1];
-      
-     }
-   }
-  
-  if(id1 != NULL) free(id1);
-  if(id2 != NULL) free(id2);
-  if(npart1 != NULL) free(npart1);
-  if(npart2 != NULL) free(npart2);
-  if(common != NULL) free(common);
-  
-  fclose(fpout);
-  fclose(fpout_merger);
-  
-   if(LocTask == 0)
-    fprintf(stderr," done\n");
-  
-  return(1);
-}
-
-/*==================================================================================================
- * read_mtree:
- *
- *       simply reads in the *_mtree file and 
- *       puts it into the array of structures mtree[iline].XYZ
- *
- * Note: at this stage we just treat these entries as "lines" -> no connection to halos yet!
- *
- *==================================================================================================*/
-void read_mtree(char *prefix)
-{
-  long unsigned iline;
-  char          line[MAXSTRING], outname[MAXSTRING];
-  FILE         *fpin;
-  
-  sprintf(outname,"%s_mtree",prefix);
-  if((fpin = fopen(outname,"r")) == NULL)
-   {
-    fprintf(stderr,"cannot open  %s\nEXIT\n",outname);
-    exit(0);
-   }
-  
-  // count number of lines
-  nlines = 0;
-  while(!feof(fpin))
-   {
-    nlines++;
-    fgets(line,MAXSTRING,fpin);
-   }
-  
-  //fprintf(stderr,"  o found %ld lines in:  %s\n",nlines,infile);
-  
-  // allocate memory
-  mtree = (MTREEptr) realloc((MTREEptr)mtree, nlines*sizeof(MTREE));
-  
-  // actually read the file
-  rewind(fpin);
-  for(iline=0; iline<nlines; iline++)
-   {
-    // read next line from file
-    fgets(line,MAXSTRING,fpin);
-    sscanf(line,"%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64,
-           &(mtree[iline].id[0]), 
-           &(mtree[iline].npart[0]), 
-           &(mtree[iline].common), 
-           &(mtree[iline].id[1]), 
-           &(mtree[iline].npart[1]));
-    //fprintf(stderr,"iline=%ld id[0]=%ld\n",iline,mtree[iline].id[0]);
-   }
-  
-  fclose(fpin);
-}
-
-#endif // MERGER_RATIO
+#endif /* DEBUG_LOG */
+#endif /* DEBUG_MPI */
