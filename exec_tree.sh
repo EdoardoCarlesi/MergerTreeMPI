@@ -5,7 +5,7 @@ home_dir='/home/carlesi/'
 mtree=$home_dir'/MERGER_TREE/'
 
 # Use serial (1) mpi version (any other number)
-use_serial=0
+use_serial=3
 
 if [ $use_serial -eq 1 ]
 then
@@ -18,14 +18,14 @@ exec_serial=$mtree'/bkp/ahf/bin/MergerTree'
 #exec_serial=$mtree'/bkp/MergerTree_v0'
 
 # List two catalogues to test the serial version
-#in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_031.AHF_particles'
-#in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_030.AHF_particles'
-#in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_029.AHF_particles'
-in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_061.z0.000.AHF_particles'
-in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_060.z0.020.AHF_particles'
-in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_059.z0.041.AHF_particles'
-out=$mtree'output/serial_sussing_'
-#out=$mtree'output/serial_test_'
+in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_031.AHF_particles'
+in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_030.AHF_particles'
+in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SmallSimuMerged/merged_029.AHF_particles'
+#in_1='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_061.z0.000.AHF_particles'
+#in_2='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_060.z0.020.AHF_particles'
+#in_3='/home/carlesi/MERGER_TREE/CATALOGUES/SussingCatalogs/62.5_dm_059.z0.041.AHF_particles'
+#out=$mtree'output/serial_sussing_'
+out=$mtree'output/serial_test_'
 
 # Execute the serial version of MergerTree
 echo $in_1 
@@ -41,7 +41,7 @@ else
 N_proc=1
 
 # Sim Type (0 = test multi snap, 1 = CLUES, 2 = SussingMT 2013)
-sim_type=2
+sim_type=0
 
 # AHF settings
 ahf=$home_dir'/MERGER_TREE/latest_ahf/'
@@ -66,7 +66,7 @@ BOX=50000
 N_read=4
 
 # Output files directory + prefix
-output=$mtree'/output/mtree_mpi'
+output=$mtree'/output/mtree_mpi_bothways'
 base_catalog=$mtree'/CATALOGUES/SmallSimu/snapshot_'
 ls -r $base_catalog*0000*particles > $temp_part
 ls -r $base_catalog*0000*halos > $temp_halo
@@ -100,7 +100,7 @@ BOX=62500
 N_read=1
 
 # Output files directory + prefix
-output=$mtree'/output/mtree_s2013_onetask_dist3mpc'
+output=$mtree'/output/mtree_s2013_dist8mpc'
 base_catalog=$mtree'/CATALOGUES/SussingCatalogs/62.5_dm'
 ls -r $base_catalog*particles > $temp_part
 ls -r $base_catalog*halos > $temp_halo
