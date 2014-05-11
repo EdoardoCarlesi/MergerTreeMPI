@@ -41,14 +41,14 @@
 #define MAX_PARENT_HALO 5	      // maximum number of haloes to which a particle can belong to
 //#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
 //#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
-#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
+//#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
 //#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
 
 //#define DEBUG_MPI
 //#define DEBUG_LOG
 
 #define	DEBUG
-#define NUM_OMP_THREADS 2
+#define NUM_OMP_THREADS 1
 
 #define IMPROVE_LB	// As the workload on each task depends on both the total number of particles and 
 			// the total number of halos, this flag enables a L/B algorithm that balances the
@@ -59,14 +59,12 @@
 #define LB_HALO_FAC 1.0
 #endif
 
-#define MOD(arg1, arg2) sqrt((arg1,arg2) * (arg1,arg2))
-
 #define MAXSTRING 1024
 #define COUNTER 5000
 #define ORDER		// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 2000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
+#define MAX_HALO_DIST 3000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -529,8 +527,8 @@ int main(int argv, char **argc)
 	//write_mtree(1, "/home/carlesi/MERGER_TREE/output/tree_mpi_test_FWD");  
 
 	/* we don't need the "temporary" halos[2] and parts[2] anymore */
-	//if(halos[2] != NULL) free_halos(2);
-	//if(parts[2] != NULL) free(parts[2]);
+	if(halos[2] != NULL) free_halos(2);
+	if(parts[2] != NULL) free(parts[2]);
 
 	/* now order by merit function the forward correlations for the mtree of the local 
 	 * halo[1] of simu1 and store them into a temporary array of structures (since when
@@ -1534,6 +1532,8 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
     /* Only take into account pairs of haloes closer than MAX_HALO_DIST*/
 #ifndef DISABLE_MAX_HALO_DISTANCE
     if (compute_com_distance(ihalo, khalo, isimu0, isimu1) == 1)
+#else
+	if(ihalo==0 && khalo==0 && LocTask ==0) fprintf(stderr, "\nComputing halo cross correlation with no distance cutoff.\n");
 #endif
        intersection(isimu0, isimu1, ihalo, khalo, common);
   }
@@ -1694,56 +1694,39 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
  */
 int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1, int isimu0, int isimu1)
 {
-  int Dist = 0;
-  double Xc0, Xc1, Yc0, Yc1, Zc0, Zc1;
-  double ModX, ModY, ModZ;
-  double D0, D1, D2, D3, D4, D5, D6, D7;
-	
-	Xc0 = halos[isimu0][ihalo0].Xc[0];
-	Xc1 = halos[isimu1][ihalo1].Xc[0];
-	Yc0 = halos[isimu0][ihalo0].Xc[1];
-	Yc1 = halos[isimu1][ihalo1].Xc[1];
-	Zc0 = halos[isimu0][ihalo0].Xc[2];
-	Zc1 = halos[isimu1][ihalo1].Xc[2];
-/*
-	ModX = MOD(Xc0 - Xc1) - BoxSize % BoxSize;
-	ModY = MOD(Yc0 - Yc1) - BoxSize % BoxSize;
-	ModZ = MOD(Zc0 - Zc1) - BoxSize % BoxSize;
+  int Dist = 0, icoord = 0;
+  double X0[3], X1[3], dX[3], dbox, dx, dSum, dDist;
 
-	D0 = sqrt(pow2(ModX) + pow2(ModY) + pow2(ModZ));
-	if(D0 < MAX_HALO_DIST) Dist = 1;
-*/
-	/* Check for periodic boundary conditions */
-    D0 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+  for(icoord = 0; icoord < 3; icoord++)
+  {
+    X0[icoord] = halos[isimu0][ihalo0].Xc[icoord];
+    X1[icoord] = halos[isimu1][ihalo1].Xc[icoord];
+  }
+  
+  dSum = 0;
 
-    D1 = sqrt( pow2(MOD(Xc0,Xc1) - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
-    D6 = sqrt( pow2(Xc0 - Xc1) + pow2(MOD(Yc0,Yc1) - BoxSize) + pow2(Zc0 - Zc1));
-    D5 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(MOD(Zc0,Zc1) - BoxSize));
+  for(icoord = 0; icoord < 3; icoord++)
+  {
+    dx = X1[icoord] - X0[icoord];
+    dx = sqrt(dx * dx);
 
-    D2 = sqrt( pow2(MOD(Xc0,Xc1) - BoxSize) + pow2(MOD(Yc0,Yc1) - BoxSize) + pow2(Zc0 - Zc1));
-    D4 = sqrt( pow2(Xc0 - Xc1) + pow2(MOD(Yc0,Yc1) - BoxSize) + pow2(MOD(Zc0,Zc1) - BoxSize));
-    D7 = sqrt( pow2(MOD(Xc0,Xc1) - BoxSize) + pow2(Yc0 - Yc1) + pow2(MOD(Zc0,Zc1) - BoxSize));
+    if(X0[icoord] > X1[icoord])
+      dbox = (BoxSize - X0[icoord]) + X1[icoord];
+    else
+      dbox = (BoxSize - X1[icoord]) + X0[icoord];
 
-    D3 = sqrt( pow2(MOD(Xc0,Xc1) - BoxSize) + pow2(MOD(Yc0,Yc1) - BoxSize) + pow2(MOD(Zc0,Zc1) - BoxSize));
-//    D0 = sqrt( pow2((Xc0 - Xc1) % MAX_HALO_DIST) + pow2((Yc0 - Yc1) % MAX_HALO_DIST) + pow2((Zc0 - Zc1) % MAX_HALO_DIST));
-//  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
+    if(dx < dbox)
+      dX[icoord] = dx;
+    else
+      dX[icoord] = dbox;
 
-   if( D0 < MAX_HALO_DIST || D1 < MAX_HALO_DIST || D2 < MAX_HALO_DIST 
-    || D3 < MAX_HALO_DIST || D4 < MAX_HALO_DIST || D5 < MAX_HALO_DIST 
-    || D6 < MAX_HALO_DIST || D7 < MAX_HALO_DIST )
-				Dist = 1;
+    dSum += pow2(dX[icoord]);
+  }
 
-//	if(D0 < MAX_HALO_DIST)
-//		Dist = 1;
+  dDist = sqrt(dSum);
 
-
-		//if(Dist == 1 && D0 > MAX_HALO_DIST && D1 > MAX_HALO_DIST && D5 > MAX_HALO_DIST)
-/*		if(Dist == 1 && D0 > MAX_HALO_DIST)
-	fprintf(stderr, "Crossed Boundary Conditions h1=%llu h2=%llu x1=%lf x2=%lf y1=%lf y2=%lf z1=%lf z2=%lf\n", 
-		halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, Xc0, Xc1, Yc0, Yc1, Zc0, Zc1);
-*/	
-//	else
-//	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid,
+  if(dDist < MAX_HALO_DIST)
+    Dist = 1;
   return Dist;
 }
 
