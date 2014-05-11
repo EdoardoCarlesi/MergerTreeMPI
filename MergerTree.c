@@ -41,8 +41,8 @@
 #define MAX_PARENT_HALO 5	      // maximum number of haloes to which a particle can belong to
 //#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
 //#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
-//#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
-//#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
+#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
+#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
 
 //#define DEBUG_MPI
 //#define DEBUG_LOG
@@ -64,7 +64,7 @@
 #define ORDER		// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 3000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
+#define MAX_HALO_DIST 10000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -514,7 +514,7 @@ int main(int argv, char **argc)
 	nHalos[2] = nHalosBuffer[2];
 	parts[2] = partsRecvBuffer[2];
 
-#ifdef DEBUG_MPI
+#ifndef DEBUG_MPI
 	fprintf(stderr, "ForwardCorrelation: Task=%d has received %"PRIu64" particles and %"PRIu64" halos from task=%d\n",
 	 		LocTask, nPartBuffer[2], nHalosBuffer[2], SendTask);
 #endif
@@ -607,9 +607,9 @@ int main(int argv, char **argc)
 
     /* make HaloFile[i+1] the new HaloFile[i] */
     nHalos[0] = nHalos[1];
-    nPart[0]  = nPart[1];
-    halos[0]  = halos[1];
-    parts[0]  = parts[1];
+    nPart[0] = nPart[1];
+    halos[0] = halos[1];
+    parts[0] = parts[1];
 
     /* be verbose */
     if(LocTask == 0)
@@ -636,11 +636,9 @@ int main(int argv, char **argc)
           if(locPartFile[jfile][ifile]) free(locPartFile[jfile][ifile]);
           if(locHaloFile[jfile][ifile]) free(locHaloFile[jfile][ifile]);
 	}
-
-          if(locPartFile[jfile]) free(locPartFile[jfile]);
-          if(locHaloFile[jfile]) free(locHaloFile[jfile]);
+        if(locPartFile[jfile]) free(locPartFile[jfile]);
+        if(locHaloFile[jfile]) free(locHaloFile[jfile]);
      }
-
      if(locPartFile) free(locPartFile);
      if(locHaloFile) free(locHaloFile);
   }
@@ -1904,7 +1902,7 @@ int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
 	    loc_croco = ncroco_simu[ihalo];
 	//   fprintf(stderr, "ihalo=%llu -> jhalo=%llu corresponds to max merit %llu,loc croco=%llu\n", 
 	//	ihalo, jhalo, halos_mpi[isimu1][jhalo].haloid_max_merit, loc_croco);
-	       mtree_tmp[ihalo] = (MTREE *) realloc(mtree_tmp[ihalo], (loc_croco + 1) * sizeof(MTREE));
+	       mtree_tmp[ihalo] = (MTREE *) realloc(mtree_tmp[ihalo], (loc_croco) * sizeof(MTREE));
 	       mtree_tmp[ihalo][loc_croco-1].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
                mtree_tmp[ihalo][loc_croco-1].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
 	       mtree_tmp[ihalo][loc_croco-1].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
