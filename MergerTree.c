@@ -181,6 +181,7 @@ int	 add_halos			(int ifile, int isimu);
 int      alloc_halos			(int isimu);
 int      free_halos			(int isimu);
 int 	 load_balance			(int isimu); 
+int	 MPI_Swaphalos			(int isimu);	// TODO
 void 	 intersection 			(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64_t *common);
 uint64_t constructHaloId(uint64_t ihalo);
 
@@ -313,6 +314,7 @@ int main(int argv, char **argc)
       load_balance(0);  
 
     /* map the particles from the halos after load balancing */
+	// TODO we do not need this mapping if we MPI_Pack the haloes directly
     particle_halo_mapping(0);
     MPI_Barrier(MPI_COMM_WORLD);  
 
@@ -352,6 +354,7 @@ int main(int argv, char **argc)
 
     MPI_Barrier(MPI_COMM_WORLD);  
 
+	// TODO we do not need this mapping if we MPI_Pack the haloes directly
     particle_halo_mapping(1);
 
     /* now swap the files across all the tasks and look for correlations */
@@ -394,11 +397,14 @@ int main(int argv, char **argc)
 	fprintf(stderr, "Task=%d has recieved %"PRIu64" particles and %"PRIu64" halos from task=%d\n",
 	 		LocTask, buffer_npart, buffer_nhalo, SendTask);
 #endif
+	// TODO Implement this function
+	MPI_Swaphalos(1);
 
  	// FIXME: why is this not working?
-	        //if(parts_buffer[1] != NULL) free(parts_buffer[1]); 
-		//	parts_buffer[1] = NULL;
+	        // if(parts_buffer[1] != NULL) free(parts_buffer[1]); 
+		// parts_buffer[1] = NULL;
 
+	// TODO Send haloes directly, using the Pack-Unpack function
 	/* allocate on LocTask a buffer to recieve parts data from SendTask */
         parts_buffer[1] = (PARTS *) calloc(buffer_npart, sizeof(PARTS));
 
@@ -419,12 +425,14 @@ int main(int argv, char **argc)
 		LocTask, SendTask, nHalos[1], nPart[1]);
 #endif
 
+	// TODO when using a single pack-unpack function we do not need this anymore
 	/* free the old pointer and set it equal to the new one */
 	if(parts[1] != NULL)
 	  free(parts[1]);
 
 	parts[1] = parts_buffer[1];
 
+	// TODO when using a single pack-unpack function we do not need this anymore
 	//MPI_Barrier(MPI_COMM_WORLD);
 	/* now reallocate the halo structs and map back the particles into their respective halos */
         alloc_halos(1);
