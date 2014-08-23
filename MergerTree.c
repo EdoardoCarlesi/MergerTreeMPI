@@ -43,7 +43,7 @@
 #include <omp.h>
 
 #define MINCOMMON       10            // we only cross-correlate haloes if they at least share MINCOMMON particles
-#define MAX_PARENT_HALO 5	      // maximum number of haloes to which a particle can belong to
+
 //#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
 //#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
 #define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
@@ -110,16 +110,6 @@ typedef struct HALO_MPI
   uint64_t  haloid_max_merit;		// ID of the descendant halo with max_merit
 }HALO_MPI;
 
-typedef struct PARTS *PARTptr;
-typedef struct PARTS
-{
-  uint64_t  nhalos;
-  uint64_t  Pid;				// This now stores the particle id corresponding to the indexed particle
-  uint64_t  Hid[MAX_PARENT_HALO];		// Hid is the global halo id 
-  uint64_t  Hindex[MAX_PARENT_HALO];		// Hid is the local halo position in halo[isimu][index]
-  double    Xc[3];				// TODO FIND A SMARTER WAY TO SEND THE C.o.M. INFORMATIONS FIXME !!!
-}PARTS;
-
 /*-------------------------------------------------------------------------------------
  *                                 GLOBAL VARIABLES
  *-------------------------------------------------------------------------------------*/
@@ -127,8 +117,6 @@ typedef struct PARTS
 HALO_MPIptr halos_mpi[2];
 HALOptr halos[3];
 HALOptr halos_tmp[2];
-PARTptr parts[2];
-PARTptr parts_buffer[3];	// on each task we need a buffer structure to save the incoming swapped particles
 PARTptr halos_buffer[3];	// on each task we need a buffer structure to save the incoming swapped particles
 
 #ifdef MTREE_BOTH_WAYS
@@ -141,8 +129,6 @@ int order_by_merit		(int isimu0);
 
 uint64_t    nHalos[3];
 uint64_t    nHalosTmp[2];
-uint64_t    nPart[3];		// total number of particles on task, use this instead of PidMax
-uint64_t    nPartTmp[2];		
 
 size_t      totHaloSize;	// when reading-in the halo keep track of its size including dynamically allocated mem
 size_t      totHaloSizeTmp;	
@@ -181,12 +167,11 @@ int	 add_halos			(int ifile, int isimu);
 int      alloc_halos			(int isimu);
 int      free_halos			(int isimu);
 int 	 load_balance			(int isimu); 
-int	 MPI_Swaphalos			(int isimu);	// TODO
+int	 MPI_Swaphalos			(int isimu, int buffer_nhalo, int buffer_npart);	// TODO
 void 	 intersection 			(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64_t *common);
 uint64_t constructHaloId(uint64_t ihalo);
 
 #ifdef DEBUG_MPI
-void 	check_parts			(int isimu);
 void 	check_halos			(int isimu);
 #endif
 
@@ -314,8 +299,6 @@ int main(int argv, char **argc)
       load_balance(0);  
 
     /* map the particles from the halos after load balancing */
-	// TODO we do not need this mapping if we MPI_Pack the haloes directly
-    particle_halo_mapping(0);
     MPI_Barrier(MPI_COMM_WORLD);  
 
   if(LocTask == 0)
@@ -354,9 +337,6 @@ int main(int argv, char **argc)
 
     MPI_Barrier(MPI_COMM_WORLD);  
 
-	// TODO we do not need this mapping if we MPI_Pack the haloes directly
-    particle_halo_mapping(1);
-
     /* now swap the files across all the tasks and look for correlations */
     for(jchunk=0; jchunk<TotTask; jchunk++)
     {
@@ -381,64 +361,15 @@ int main(int argv, char **argc)
       /* wait for all the processes to end the correlation */
       MPI_Barrier(MPI_COMM_WORLD);  
 
-#ifndef DEBUG_MPI
-	fprintf(stderr, "Task=%d is sending %"PRIu64" particles and %"PRIu64" halos to task=%d\n",
-	 		LocTask, nPart[1], nHalos[1], RecvTask);
-#endif
-
-	/* swap the number of particles and halos across tasks */
-	MPI_Sendrecv(&nPart[1], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
-                 &buffer_npart, sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-	MPI_Sendrecv(&nHalos[1], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
-                  &buffer_nhalo, sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-#ifdef DEBUG_MPI
-	fprintf(stderr, "Task=%d has recieved %"PRIu64" particles and %"PRIu64" halos from task=%d\n",
-	 		LocTask, buffer_npart, buffer_nhalo, SendTask);
-#endif
 	// TODO Implement this function
-	MPI_Swaphalos(1);
-
- 	// FIXME: why is this not working?
-	        // if(parts_buffer[1] != NULL) free(parts_buffer[1]); 
-		// parts_buffer[1] = NULL;
-
-	// TODO Send haloes directly, using the Pack-Unpack function
-	/* allocate on LocTask a buffer to recieve parts data from SendTask */
-        parts_buffer[1] = (PARTS *) calloc(buffer_npart, sizeof(PARTS));
-
-	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
-	  MPI_Sendrecv(parts[1], nPart[1] * sizeof(PARTS), MPI_BYTE, RecvTask, 0, 
-	    parts_buffer[1], buffer_npart * sizeof(PARTS), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-	/* Free the old simu1 halo structures before reconstructing the new ones from
-           the swapped particles. Do this before resetting nHaloes[1] from the buffer value */
-        free_halos(1);
+	MPI_Swaphalos(1, buffer_npart, buffer_nhalo);
 	
 	/* update the local number of particles after Sendrecv */
-	nPart[1] = buffer_npart;
 	nHalos[1] = buffer_nhalo;
 
 #ifdef DEBUG_MPI
-	fprintf(stderr, "Task= %d has received from task = %d a total of %llu haloes and %llu particles\n",
-		LocTask, SendTask, nHalos[1], nPart[1]);
+	fprintf(stderr, "Task= %d has received from task = %d a total of %lu haloes\n", LocTask, SendTask, nHalos[1]);
 #endif
-
-	// TODO when using a single pack-unpack function we do not need this anymore
-	/* free the old pointer and set it equal to the new one */
-	if(parts[1] != NULL)
-	  free(parts[1]);
-
-	parts[1] = parts_buffer[1];
-
-	// TODO when using a single pack-unpack function we do not need this anymore
-	//MPI_Barrier(MPI_COMM_WORLD);
-	/* now reallocate the halo structs and map back the particles into their respective halos */
-        alloc_halos(1);
-        halo_particle_mapping(1);
-
-        //MPI_Barrier(MPI_COMM_WORLD);  
     } /* End swapping data */
 
 #ifdef MTREE_BOTH_WAYS
@@ -446,10 +377,8 @@ int main(int argv, char **argc)
      * this time isimu=1 is fixed and isimu=0 is swapped through the tasks
      * however, we keep the original halo[0] struct intact on each task
      */
-    parts[2] = parts[0];
     halos[2] = halos[0];
     nHalos[2] = nHalos[0];
-    nPart[2] = nPart[0];
 
     for(jchunk=0; jchunk<TotTask; jchunk++)
     {
@@ -467,57 +396,8 @@ int main(int argv, char **argc)
 
       elapsed = (time_t) 0;
 
-      /* wait for all the processes to end the correlation */
-      MPI_Barrier(MPI_COMM_WORLD);  
-
-#ifndef DEBUG_MPI
-	fprintf(stderr, "Task=%d is sending %"PRIu64" particles and %"PRIu64" halos to task=%d\n",
-	 		LocTask, nPart[2], nHalos[2], RecvTask);
-#endif
-
-	/* swap the number of particles and halos across tasks */
-	MPI_Sendrecv(&nPart[2], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
-                 &buffer_npart, sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-	MPI_Sendrecv(&nHalos[2], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
-                  &buffer_nhalo, sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-#ifdef DEBUG_MPI
-	fprintf(stderr, "Task=%d has recieved %"PRIu64" particles and %"PRIu64" halos from task=%d\n",
-	 		LocTask, buffer_npart, buffer_nhalo, SendTask);
-#endif
-
-	/* allocate on LocTask a buffer to recieve parts data from SendTask */
-        parts_buffer[2] = (PARTS *) calloc(buffer_npart, sizeof(PARTS));
-
-	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
-	  MPI_Sendrecv(parts[2], nPart[2] * sizeof(PARTS), MPI_BYTE, RecvTask, 0, 
-	    parts_buffer[2], buffer_npart * sizeof(PARTS), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
-
-	/* Set this pointer to null */ 
-	if(jchunk == 0)
-		halos[2] = NULL; // We do not want to free the memory related to halo[0]
-	else
-		if(halos[2]!=NULL) free_halos(2);
-
-	/* update the local number of particles after Sendrecv */
-	nPart[2] = buffer_npart;
-	nHalos[2] = buffer_nhalo;
-
-#ifdef DEBUG_MPI
-	fprintf(stderr, "Task= %d has received from task = %d a total of %llu haloes and %llu particles\n",
-		LocTask, SendTask, nHalos[2], nPart[2]);
-#endif
-
-	/* free the old pointer and set it equal to the new one */
-	if(parts[2] != NULL)
-	  free(parts[2]);
-
-	parts[2] = parts_buffer[2];
-
-	/* now reallocate the halo structs and map back the particles into their respective halos */
-        alloc_halos(2);
-        halo_particle_mapping(2);
+      /* swap the number of particles and halos across tasks */
+      MPI_Swaphalos(2);
 
     } /* End swapping data for forward cross_correlation */
 
@@ -558,21 +438,19 @@ int main(int argv, char **argc)
    */
     for(jchunk=1; jchunk<TotTask; jchunk++)
     {
-	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
-	  MPI_Sendrecv(halos_mpi[1], nHalos[1] * sizeof(HALO_MPI), MPI_BYTE, RecvTask, 0, 
-	    halos_buffer[1], buffer_nhalo * sizeof(HALO_MPI), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+       /* now swap the halos across all tasks */
+       MPI_Swaphalos(1);
 
 #ifdef WITH_OPENMP2
 #  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
 #endif
-  for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
-    clean_connection(ihalo, 0, 1, jchunk);
+    for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
+       clean_connection(ihalo, 0, 1, jchunk);
+     }
+       elapsed = clock()-elapsed;
+       fprintf(stderr," done in %4.2f sec\n", (double)elapsed/CLOCKS_PER_SEC);
   }
-  elapsed = clock()-elapsed;
-  fprintf(stderr," done in %4.2f sec\n", (double)elapsed/CLOCKS_PER_SEC);
-
-  }
-#endif
+#endif /* End BOTH_WAYS */
 
 	write_mtree(0, locOutFile[ifile]);  
 
@@ -583,16 +461,9 @@ int main(int argv, char **argc)
     /* remove halo[0] structs from memory */
     free_halos(0);
 
-     if(parts[0] != NULL) {
-        free(parts[0]);
-        parts[0] = NULL;
-    }
-
     /* make HaloFile[i+1] the new HaloFile[i] */
     nHalos[0] = nHalos[1];
-    nPart[0]  = nPart[1];
     halos[0]  = halos[1];
-    parts[0]  = parts[1];
 
     /* be verbose */
     if(LocTask == 0)
@@ -810,8 +681,6 @@ int load_balance(int isimu)
 
          MPI_Pack(&halos[isimu][jhalo].Pid[0], sizeLocHalo, MPI_BYTE, haloBuffer[irecv], 
           sizeBuffer[irecv], &buffer_position[irecv], MPI_COMM_WORLD);
-
-         nPart[isimu] -= locNPart;
       }
 
       nHalosBuffer[irecv]++;
@@ -990,6 +859,112 @@ int load_balance(int isimu)
 }
 
 
+/*
+ * This function swaps the halo structures across the tasks using the MPI_Pack / MPI_Unpack functions 
+ * to be able to send dynamically allocated data.
+ */
+int MPI_Swaphalos(int isimu)
+{
+  int buffer_nhalos=0, buffer_pos_recv=0, buffer_position=0, ihalo=0, jhalo=0, ipart=0, jpart=0; 
+  size_t sizeUInt64=0, sizeSendBuffer=0, sizeRecvBuffer=0, sizeLocHalo=0; 
+  uint64_t *haloSendBuffer=NULL, *haloRecvBuffer=NULL, locNPart=0; 
+
+  sizeUInt64 = sizeof(uint64_t);
+
+    /* Figure out how much every task has to send */
+    haloSendBuffer = (uint64_t *) calloc(1, sizeof(uint64_t)); 
+
+    /* Loop over haloes and assign them to the different tasks, packing them into separate buffers */
+    for(ihalo=1; ihalo<=nHalos[isimu]; ihalo++)
+    {
+      locNPart = halos[isimu][ihalo].npart;
+      sizeLocHalo = locNPart * sizeUInt64; 
+
+      /* Each halo holds two uint64_t, two arrays Pid and Pindex, plus the coordinates */
+      sizeBuffer += 2 * sizeUInt64 * (locNPart + 1) + 3 * sizeof(double);
+      haloSendBuffer = (uint64_t *) realloc(haloSendBuffer, sizeBuffer);
+
+      /* Pack the halo and particles information into a single buffer */
+      MPI_Pack(&halos[isimu][ihalo].haloid, 2 * sizeUInt64, MPI_BYTE, haloSendBuffer,
+        sizeBuffer, &buffer_position, MPI_COMM_WORLD);
+
+      MPI_Pack(&halos[isimu][ihalo].Xc[0], 3 * sizeof(double), MPI_BYTE, haloSendBuffer,
+        sizeBuffer, &buffer_position, MPI_COMM_WORLD);
+
+      MPI_Pack(&halos[isimu][ihalo].Pid[0], 2 * sizeLocHalo, MPI_BYTE, haloSendBuffer, 
+        sizeBuffer, &buffer_position, MPI_COMM_WORLD);
+	
+      /* Free Pid and Pindex space once it's packed */
+      free(halos[isimu][ihalo].Pid);
+      free(halos[isimu][ihalo].Pindex);
+
+    } /* for ihalo */
+
+#ifdef DEBUG_MPI
+   fprintf(stderr, "Task=%d is left with %"PRIu64" and %"PRIu64" particles.\n",
+	LocTask, nHalos[isimu], nPart[isimu]);
+#endif
+
+   MPI_Sendrecv(&nHalos[isimu], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
+                &buffer_nhalo,  sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+
+   MPI_Sendrecv(&sizeSendBuffer, sizeof(size_t), MPI_BYTE, RecvTask, 0,
+                &sizeRecvBuffer, sizeof(size_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+
+   free(halos[isimu]);
+
+   haloRecvBuffer = (uint64_t *) malloc(sizeRecvBuffer);
+   nHalos[isimu] = buffer_nhalos;
+
+   MPI_Sendrecv(&haloSendBuffer, sizeof(size_t), MPI_BYTE, RecvTask, 0,
+                &haloRecvBuffer, sizeof(size_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+
+	// TODO may give segfault problems
+   free(haloSendBuffer);
+
+#ifdef DEBUG_MPI
+    fprintf(stderr, "Task=%d has done packing data, local data size is now=%zd, with %"PRIu64" halos.\n", 
+	LocTask, sizeSendBuffer, nHalos[isimu]);
+
+    fprintf(stderr, "Sending %zd bytes of messages on task=%d from task=%d.\n", 
+	sizeRecvBuffer, LocTask, SendTask);
+#endif
+
+    /* Now unpack halos particles information from the buffers into the halos structures */
+    halos[isimu]   = (HALOptr) calloc(nHalos[isimu], sizeof(HALOS));
+    buffer_pos_recv = 0;
+
+    for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
+    {
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].haloid, 
+	sizeUInt64, MPI_BYTE, MPI_COMM_WORLD);
+	
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].npart, 
+ 	sizeUInt64, MPI_BYTE, MPI_COMM_WORLD);
+
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Xc[0], 
+ 	3 * sizeof(double), MPI_BYTE, MPI_COMM_WORLD);
+
+       locNPart = halos[isimu][ihalo].npart;
+       sizeLocHalo = (size_t) locNPart * sizeUInt64;
+
+       halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeLocHalo);
+       halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeLocHalo);
+
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pid[0], 
+        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
+
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pindex[0], 
+        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
+    }
+   } /* if(LocTask >= NReadTask)*/
+
+  /* Now free local buffers */
+  free(haloRecvBuffer);
+
+  return(1);
+}
+
 
 /*==================================================================================================
  * assign_input_files_to_tasks:
@@ -1113,7 +1088,7 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   FILE     *fpin;
   char      line[MAXSTRING];
   int64_t   ihalo;
-  uint64_t  nPartInHalo, nPartInUse, ipart, Pid, Pindex, Ptype, haloid;
+  uint64_t  ipart, Pid, Pindex, Ptype, haloid;
   time_t    elapsed = (time_t)0;
 
   elapsed -= time(NULL);
@@ -1134,7 +1109,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   
   /* reset all variables */
   nHalosTmp[isimu] = 0;
-  nPartTmp[isimu]  = 0;
   ihalo         = -1;
   halos_tmp[isimu]  = NULL;
 
@@ -1213,7 +1187,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
 
           halos_tmp[isimu][ihalo].Pid[nPartInUse] = Pid;
           halos_tmp[isimu][ihalo].Pindex[nPartInUse] = Pindex;
-          nPartInUse++;
 	  Pindex++;
          }
        }
@@ -1222,7 +1195,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
       halos_tmp[isimu][ihalo].npart = nPartInUse;  
 
       /* add to the total number of particles on task, plus the haloid and haloindex */    
-      nPartTmp[isimu] += nPartInUse;
       totHaloSizeTmp += 2 * (nPartInUse + 1) * sizeof(uint64_t) + 3 * sizeof(double);
      }
 
@@ -1296,139 +1268,6 @@ int read_positions(char filename[MAXSTRING], int isimu)
 
   if(LocTask == 0)
    fprintf(stderr," done in %ld sec, nHalos=%"PRIu64", totHaloSize=%zd\n", elapsed, nHalos[isimu], totHaloSize); 
-
-  return(1);
-}
-
-/*==================================================================================================
- * particle_halo_mapping:
- *
- *  for each particle remember to which halo(s) it belongs
- *
- *==================================================================================================*/
-int particle_halo_mapping(int isimu)
-{
-  int64_t  ihalo;         	// the downwards for-loop is running until ihalo=-1
-  uint64_t ipart, jpart, npart, nparts;
-  time_t   elapsed = (time_t)0;
-
-  npart = nPart[isimu];
-  parts[isimu] = (PARTptr) calloc(npart, sizeof(PARTS));
-
-  elapsed -= time(NULL);
-
-#ifdef DEBUG_MPI
-  fprintf(stderr,"  o creating particle<->halo mapping for file %d (PidMax=%"PRIu64", halos=%"PRIu64") on task %d ...",
-		isimu, npart, nHalos[isimu], LocTask);
-  fprintf(stderr, "\nAllocated %"PRIu64" parts on task %d\n", npart, LocTask);
-#else
-  if(LocTask == 0)
-    fprintf(stderr,"  o creating particle<->halo mapping for file %d (n part=%"PRIu64") ...",isimu,npart);
-#endif
-
-  /* recording every halo it belongs to: running from low to high mass objects to allow for unique assignment! */
-  for(ihalo=nHalos[isimu]-1; ihalo>=0; ihalo--)
-   {
-      /* Order particles here */
-      nparts = halos[isimu][ihalo].npart;
-      halos[isimu][ihalo].Pidord = calloc(nparts, sizeof(uint64_t));
-      memcpy(halos[isimu][ihalo].Pidord, halos[isimu][ihalo].Pid, nparts * sizeof(uint64_t));   
-      qsort(halos[isimu][ihalo].Pidord, nparts, sizeof(uint64_t), &cmpfunc);
-
-    for(jpart=0; jpart<halos[isimu][ihalo].npart; jpart++)
-     {
-      ipart = halos[isimu][ihalo].Pindex[jpart];
-#ifdef EXCLUSIVE_PARTICLES
-      if(parts[isimu][ipart].nhalos == 0)
-#endif
-       {
-           parts[isimu][ipart].nhalos++;
-	 if(parts[isimu][ipart].nhalos<MAX_PARENT_HALO)
-	  {
-            parts[isimu][ipart].Hindex[parts[isimu][ipart].nhalos-1] = ihalo;
-            parts[isimu][ipart].Hid[parts[isimu][ipart].nhalos-1] = halos[isimu][ihalo].haloid;
-            parts[isimu][ipart].Pid = halos[isimu][ihalo].Pid[jpart];
-            parts[isimu][ipart].Xc[0] = halos[isimu][ihalo].Xc[0];
-            parts[isimu][ipart].Xc[1] = halos[isimu][ihalo].Xc[1];
-            parts[isimu][ipart].Xc[2] = halos[isimu][ihalo].Xc[2];
-	  } 
-  	 else
-	  {
-            parts[isimu][ipart].nhalos--;
-	  }
-       }
-     }
-   }
-  
-  elapsed += time(NULL);
-
-  if(LocTask == 0)
-    fprintf(stderr,"\n done in %ld sec.\n",elapsed);
-  return(1);
-}
-
-
-/*==================================================================================================
- * halo_particle_mapping:
- *
- *  Reconstruct the halo - particle map
- *  Since we are swapping particles only (not halos) between the different snapshots, 
- *  we need to reconstruct the halo structs, using the haloid data in the part structs.
- *
- *==================================================================================================*/
-int halo_particle_mapping(int isimu)
-{
-  uint64_t ipart, locn, ihalo, jhalo, nparts;
-  time_t   elapsed = (time_t)0;
-
-  elapsed -= time(NULL);
-
-  if(LocTask == 0)
-    fprintf(stderr,"  o creating halo<->particle mapping for simu %d on task=%d...\n",isimu, LocTask);
-
-  /* Loop over particles */
-  for(ipart=0; ipart<nPart[isimu]; ipart++)
-   {
-    /* Now for each particle loop over the haloes it belongs to */
-    for(jhalo=0; jhalo<parts[isimu][ipart].nhalos; jhalo++)
-     {
-         ihalo = parts[isimu][ipart].Hindex[jhalo]; // Hindex contains the local halo number
-	 halos[isimu][ihalo].npart++;
-         locn = halos[isimu][ihalo].npart;
-
-         halos[isimu][ihalo].haloid = parts[isimu][ipart].Hid[jhalo]; // Hid contains the absolute halo ID
-         halos[isimu][ihalo].Xc[0] = parts[isimu][ipart].Xc[0]; 
-         halos[isimu][ihalo].Xc[1] = parts[isimu][ipart].Xc[1]; 
-         halos[isimu][ihalo].Xc[2] = parts[isimu][ipart].Xc[2]; 
- 
-#ifndef DEBUG_MPI
-  if(LocTask == 1 && halos[isimu][ihalo].haloid == 0)
-    	fprintf(stderr,"Task=%d at halo = %llu, npart=%llu, locn=%llu haloid=%llu IPART=%llu IDpart=%llu...\n", 
-		LocTask, jhalo, nPart[isimu], halos[isimu][ihalo].npart, halos[isimu][ihalo].haloid, 
-		ipart, parts[isimu][ipart].Pid);
-#endif
- 
-         halos[isimu][ihalo].Pid = (uint64_t *) realloc(halos[isimu][ihalo].Pid, locn*sizeof(uint64_t));
-         halos[isimu][ihalo].Pindex = (uint64_t *) realloc(halos[isimu][ihalo].Pindex, locn*sizeof(uint64_t));
-
-         halos[isimu][ihalo].Pindex[locn-1] = ipart;
-         halos[isimu][ihalo].Pid[locn-1] = parts[isimu][ipart].Pid;
-     }
-   }
-
-   /* now reconstruct the local ordered paricles list */
-   for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
-   {      
-      nparts = halos[isimu][ihalo].npart;
-      halos[isimu][ihalo].Pidord = calloc(nparts, sizeof(uint64_t));
-      memcpy(halos[isimu][ihalo].Pidord, halos[isimu][ihalo].Pid, nparts * sizeof(uint64_t));   
-      qsort(halos[isimu][ihalo].Pidord, nparts, sizeof(uint64_t), &cmpfunc);
-   }
-
-  elapsed += time(NULL);
-
-  if(LocTask == 0)
-   fprintf(stderr,"\n done in %ld sec.\n",elapsed);
 
   return(1);
 }
