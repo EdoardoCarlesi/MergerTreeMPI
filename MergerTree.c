@@ -19,16 +19,16 @@
  *    1       12
  *    1        4    -> halo #1 in file1 shares particles with halos #2,12,4  in file2
  *       etc.
- *	
- * TODO:	- save memory in communication use two separated HALO + HALO_MPI structures 	
- * 		- remove the Xc[3] from the part struct
- *		- put a threshold on the min_num_part for each halo to be considered
- *
+ * TODO:
+ * 	- Impose the HALO_MIN_PART already when reading particles in (save memory)
+ *	- Use halos_mpi struct to send Xc[] - halo positions - and to read them in from AHF_halos
+ *	- Check the periodic conditions algorithm (can be improved perhaps?)
+ *      - Remove Pindex from the HALO struct (useless ?)
+ * 	- Each halo struct might just contain a pointer to halo_mpi instead of storing all the informations
  *==================================================================================================*/
 
 #include <stddef.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
@@ -43,17 +43,22 @@
 #include <omp.h>
 
 #define MINCOMMON       10            // we only cross-correlate haloes if they at least share MINCOMMON particles
+//#define	USE_HALO_MIN_PART
 
-//#define ONLY_USE_PTYPE 1              // restrict analysis to particles of this type (1 = dark matter)
-//#define EXCLUSIVE_PARTICLES           // each particle is only allowed to belong to one object (i.e. the lowest mass one)
-#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
-//#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
+#ifdef	USE_HALO_MIN_PART
+#define HALO_MIN_PART	50
+#endif
 
-//#define DEBUG_MPI
+//#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
+#define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
+
+#define DEBUG_MPI
 //#define DEBUG_LOG
 
+#define READ_HALO_ID_FROM_FILE		// With this flag on the HALO_ID will be read directly from the AHF_halos files
+
 #define	DEBUG
-#define NUM_OMP_THREADS 2
+#define NUM_OMP_THREADS 1
 
 #define IMPROVE_LB	// As the workload on each task depends on both the total number of particles and 
 			// the total number of halos, this flag enables a L/B algorithm that balances the
@@ -64,14 +69,12 @@
 #define LB_HALO_FAC 1.0
 #endif
 
-#define MOD(arg) sqrt((arg) * (arg))
-
-//#define MAXSTRING 1024
-#define COUNTER 5000
+#define MAXSTRING 1024
+#define COUNTER 5000	// Counter to print out stuff - work in progress
 #define ORDER		// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 3000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
+#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -90,7 +93,7 @@ typedef struct HALOS
 {
   uint64_t  haloid;
   uint64_t  npart;
-  double    Xc[3];		// C.o.m. position of the halo
+  float    Xc[3];		// C.o.m. position of the halo
   uint64_t *Pid;	// Pid holds the global particle ID
   uint64_t *Pidord;	// Pid holds the global particle ID ordered using qsort
   uint64_t *Pindex;	// Index is the local particle position in struct parts[i][index]
@@ -105,27 +108,29 @@ typedef struct HALO_MPI
 {
   uint64_t  haloid;
   uint64_t  npart;
-  double    Xc[3];		// C.o.m. position of the halo
+  float    Xc[3];		// C.o.m. position of the halo
   uint64_t  ncroco;		// Global number - sums all the haloes swapped so far
   uint64_t  haloid_max_merit;		// ID of the descendant halo with max_merit
+  uint64_t  id_max_merit;		// Local HALO position of the descendant halo with max_merit
 }HALO_MPI;
+
 
 /*-------------------------------------------------------------------------------------
  *                                 GLOBAL VARIABLES
  *-------------------------------------------------------------------------------------*/
-
-HALO_MPIptr halos_mpi[2];
-HALO_MPIptr halos_buffer[2];
 HALOptr halos[3];
-HALOptr halos_tmp[2];
+HALOptr halos_tmp[3]; 		// This structure stores the haloes when reading multiple files per task
+HALO_MPIptr halos_mpi[3];
+		/* MPI Communication Buffers */
+HALO_MPIptr halos_mpiSendBuffer[3];	// on each task we need a buffer structure to send the incoming swapped halos_mpi
+HALO_MPIptr halos_mpiRecvBuffer[3];	// on each task we need a buffer structure to store the incoming swapped halos_mpi
+uint64_t nHalosBuffer[3];	// Buffer to recieve the new total number of halos
 
 #ifdef MTREE_BOTH_WAYS
-MTREEptr  **mtree_tmp[2];	// When doing the mtree both ways, we need to store the mtree for the 1->0, since
+MTREEptr  *mtree_tmp;	// When doing the mtree both ways, we need to store the mtree for the 1->0, since
 				// simu 1 is the one which is being swapped through the tasks
-uint64_t  *ncroco_simu[2];	// Keep track of the total number of croco in simu1 on the local task
+uint64_t  *ncroco_simu;	// Keep track of the total number of croco in simu1 on the local task
 #endif
-
-int order_by_merit		(int isimu0);
 
 uint64_t    nHalos[3];
 uint64_t    nHalosTmp[2];
@@ -150,30 +155,32 @@ MPI_Status status;
  *-------------------------------------------------------------------------------------*/
 int      read_particles         (char filename[MAXSTRING], int isimu, int ifile);
 int      read_positions         (char filename[MAXSTRING], int isimu);
-int      particle_halo_mapping  (int  isimu);
-int      halo_particle_mapping  (int  isimu);
 int      cross_correlation      (int  iloop, int simu0, int simu1); 
 int      create_mtree           (uint64_t ihalo, int isimu0, int isimu1, int iloop);
 int      clean_connection       (uint64_t ihalo, int isimu0, int isimu1, int iloop);
 int      write_mtree            (int isimu0, char OutFile[MAXSTRING]);
+int 	 order_by_merit		(int isimu0);
 uint64_t max_merit              (uint64_t ihalo, int isimu);
-int      compute_com_distance	(uint64_t ihalo0, uint64_t ihalo1);
 
 int	 assign_input_files_to_tasks	(char *partList, char *haloList, char *tempDir, char ***locPartFile, 
 					 char ***locHaloFile, int nFiles);
 int	 assign_output_files_names	(char *outList, char **outSuffix, int nFiles);
 int 	 cmpfunc			(const void * a, const void * b); 
+
+int	 MPI_Swaphalos			(int isimu);
 int	 add_halos			(int ifile, int isimu);
+int	 copy_halos			(int isimu0, int isimu1);
+int	 copy_halos_to_halos_mpi	(int isimu0);
 int      alloc_halos			(int isimu);
 int      free_halos			(int isimu);
+int      order_halo_ids			(int isimu);
+
 int 	 load_balance			(int isimu); 
-int	 MPI_Swaphalos			(int isimu);
 void 	 intersection 			(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64_t *common);
+int      compute_com_distance	(uint64_t ihalo0, uint64_t ihalo1, int isimu0, int isimu1);
 uint64_t constructHaloId(uint64_t ihalo);
 
-#ifdef DEBUG_MPI
 void 	check_halos			(int isimu);
-#endif
 
 
 /*==================================================================================================
@@ -184,7 +191,7 @@ void 	check_halos			(int isimu);
  *==================================================================================================*/
 int main(int argv, char **argc)
 {
-  int    ifile, jfile, ihalo, jchunk, count, nFiles;   // nFiles is the number of snapshots (composed of several chunks)
+  int    ifile, ihalo, jfile, jchunk, count, nFiles;   // nFiles is the number of snapshots (composed of several chunks)
   char   *tempDir;		// Temporary files are stored here - to be cleaned at the end of the run
   char   *outList;		// List of snapshots file numbers, _??? format
   char   *partList;		// This file contains all the files to be submitted to task 0 
@@ -193,7 +200,6 @@ int main(int argv, char **argc)
 
   /* local variables */
   time_t   elapsed = (time_t)0, total = (time_t) 0;
-  size_t   sizeHaloMpi; 	// Size of the struct HALO_MPI minus the size of ncroco
 
   char   **outSuffix=NULL; 		// Suffix numbers to the particle files
   char   ***locPartFile=NULL;		// Each task stores _particle urls here
@@ -214,7 +220,7 @@ int main(int argv, char **argc)
 
 #ifdef DEBUG_MPI
   /* check that the global variables have been read correctly */
-  for(ifile=0; ifile<7; ifile++)
+  for(ifile=0; ifile<8; ifile++)
     fprintf(stderr, "argc[%d]=%s\n", ifile+1, argc[ifile+1]);
 #endif
 
@@ -222,8 +228,6 @@ int main(int argv, char **argc)
   MPI_Init(&argv, &argc);
   MPI_Comm_rank(MPI_COMM_WORLD, &LocTask); 
   MPI_Comm_size(MPI_COMM_WORLD, &TotTask); 
-
-////	fprintf(stderr, " **************** LocTask=%d TotTask=%d\n", LocTask, TotTask);
 
   /* RecvTask is recieving from LocTask and SendTask is sending to LocTask */
   SendTask = (LocTask+TotTask-1) % (TotTask); 
@@ -294,14 +298,13 @@ int main(int argv, char **argc)
     if(DeltaTask > 0) 
       load_balance(0);  
 
-    /* map the particles from the halos after load balancing */
-    MPI_Barrier(MPI_COMM_WORLD);  
+    /* This is needed for faster shared particles comparison */
+    order_halo_ids(0);
 
   if(LocTask == 0)
-    fprintf(stderr,"\n\n\n\n\n");
+    fprintf(stderr,"\n");
 
-
-  /* now loop over all files */
+  /* now loop over all file chunks to be read by each task */
   for(ifile=0; ifile<nFiles-1; ifile++)
   {
     sprintf(locOutFile[ifile], "%s%s%s.%04d", prefixOut, outSuffix[ifile], outSuffix[ifile+1], LocTask); 
@@ -328,7 +331,8 @@ int main(int argv, char **argc)
     if(DeltaTask > 0)   
        load_balance(1);  
 
-    MPI_Barrier(MPI_COMM_WORLD);  
+    /* This is needed for faster shared particles comparison */
+    order_halo_ids(1);
 
     /* now swap the files across all the tasks and look for correlations */
     for(jchunk=0; jchunk<TotTask; jchunk++)
@@ -345,105 +349,131 @@ int main(int argv, char **argc)
         fprintf(stderr, "Cross correlation completed step %d/%d of file %d in %ld sec, total elapsed time is %ld s.\n", 
 	        jchunk+1, TotTask, jfile, elapsed, total);
 
+      MPI_Barrier(MPI_COMM_WORLD);
+
+      /* Now that the comparison has been done, swap the halos structs through tasks */
+      MPI_Swaphalos(1);
+
       elapsed = (time_t) 0;
 
-#ifdef DEBUG_MPI 
+#ifdef DEBUG_MPI
+      fprintf(stderr, "Task= %d has received from task = %d a total of %"PRIu64" haloes\n",
+		LocTask, SendTask, nHalos[1]);
       fprintf(stderr, "Total elapsed time on task=%d is %ld sec.\n", LocTask, total);
 #endif
 
-      /* wait for all the processes to end the correlation */
-      MPI_Barrier(MPI_COMM_WORLD);  
-
-      /* This function swaps halo structs and nHalo arrays among all tasks */
-      MPI_Swaphalos(1);
-
-#ifdef DEBUG_MPI
-	fprintf(stderr, "Task= %d has received from task = %d a total of %lu haloes\n", LocTask, SendTask, nHalos[1]);
-#endif
     } /* End swapping data */
 
+#ifndef MTREE_BOTH_WAYS
+	write_mtree(0, locOutFile[ifile]);  
+#endif
+
 #ifdef MTREE_BOTH_WAYS
+      if(LocTask == 0)
+	fprintf(stderr, "Starting forward cross correlation.\n");
+
     /* now swap the files across all the tasks and look for correlations 
      * this time isimu=1 is fixed and isimu=0 is swapped through the tasks
-     * however, we keep the original halo[0] struct intact on each task
+     * however, we keep the original halo[0] struct intact on each task, to "save" its merger tree
      */
-    halos[2] = halos[0];
+
+    /* copy the particles and halos into new structures */
     nHalos[2] = nHalos[0];
+
+    alloc_halos(2);
+
+    /* First we copy the 0 halo structs into 2, since we will then swap these ones */
+    copy_halos(0, 2);
+
+    order_halo_ids(2);
 
     for(jchunk=0; jchunk<TotTask; jchunk++)
     {
       elapsed -= time(NULL);
 
-      /* cross correlate locHaloFile[i] to locHaloFile[i+1] */
+      /* cross correlate locHaloFile[i+1] to locHaloFile[i] */
       cross_correlation(jchunk, 1, 2);
 
       elapsed += time(NULL);
       total += elapsed;
 
+#ifdef DEBUG_MPI
       if(LocTask == 0)
-        fprintf(stderr, "Forward cross correlation completed step %d/%d of file %d in %ld sec,\
-			total elapsed time is %ld s.\n", jchunk+1, TotTask, jfile, elapsed, total);
+        fprintf(stderr, "Forward cross correlation completed step %d/%d of file %d in %ld sec,total elapsed time is %4.2f s.\n", 
+		jchunk+1, TotTask, jfile, (double)elapsed/CLOCKS_PER_SEC, total);
+#endif
 
       elapsed = (time_t) 0;
 
-      /* swap the number of particles and halos across tasks */
-      MPI_Swaphalos(2);
+	/* swap the halos across tasks */
+	MPI_Swaphalos(2);
 
+#ifdef DEBUG_MPI
+	fprintf(stderr, "ForwardCorrelation: Task=%d has received %"PRIu64" halos from task=%d\n",
+	 		LocTask, nHalosBuffer[2], SendTask);
+#endif
     } /* End swapping data for forward cross_correlation */
+
+	/* we don't need the "temporary" halos[2] anymore */
+	if(halos[2] != NULL) free_halos(2);
 
 	/* now order by merit function the forward correlations for the mtree of the local 
 	 * halo[1] of simu1 and store them into a temporary array of structures (since when
 	 * we will swap the pointer insite the HALO struct we won't pass the whole mtree)
 	 */
 	order_by_merit(1);
-	mtree_tmp[1] = (MTREEptr **) calloc(nHalos[1], sizeof(MTREEptr *));
+	jchunk = 0;
+
+	/* this variable stores the cross_connections that uniquely connect a progenitor to a descendant halo */
+	ncroco_simu = (uint64_t *) calloc(nHalos[0], sizeof(uint64_t));
 	halos_mpi[1] = (HALO_MPIptr) calloc(nHalos[1], sizeof(HALO_MPI));
-	ncroco_simu[2] = (uint64_t *) calloc(nHalos[1], sizeof(uint64_t));	
-	sizeHaloMpi = (size_t) 3 * sizeof(double) + 2 * sizeof(uint64_t);
 
-          for(ihalo = 0; ihalo < nHalos[1]; ihalo++)
-	  {
-		ncroco_simu[1][ihalo] = halos[1][ihalo].global_ncroco;
-	      	mtree_tmp[1][ihalo] = (MTREEptr *) calloc(1, sizeof(MTREEptr));
-		// Copy the first entry in the mtree, max_merit
-        	//memcpy(&mtree_tmp[1][ihalo][0], &halos[1][ihalo].mtree[0], sizeof(MTREE)); 
-		memcpy(&halos_mpi[1][ihalo].haloid, &halos[1][ihalo].haloid, sizeHaloMpi); 
-		halos_mpi[1][ihalo].ncroco = halos[1][ihalo].global_ncroco; 
-		halos_mpi[1][ihalo].haloid_max_merit = halos[1][ihalo].mtree[0].id[1]; 
-		
-		free(halos[1][ihalo].mtree);
-	  }
-
-	/* now that the data have been stored into HALO_MPI the halos[1] can be freed to leave room for the buffer */
-	free(halos[1]);	
-
-	halos_buffer[1] = (HALO_MPIptr) calloc(nHalos[1], sizeof(HALO_MPI));
-
-	/* First clean_connection simu0->simu1 using local data */ 
-  	for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
-  	  clean_connection(ihalo, 0, 1, 0);
-  	}
+	copy_halos_to_halos_mpi(1);
+ 
+	/* Init the temp mtree struct to store all the clean_conn data */
+     	mtree_tmp = (MTREEptr *) calloc(nHalos[0], sizeof(MTREEptr));
 
   /* now clean connections simu0->simu1 
-   * we need to swap ALL halos and mtree_tmp in simu1 again for proper comparison...
+   * we need to swap all halos_mpi in simu1 again for proper comparison...
    */
-    for(jchunk=1; jchunk<TotTask; jchunk++)
+    for(jchunk=0; jchunk<TotTask; jchunk++)
     {
-       /* now swap the halos across all tasks */
-       MPI_Swaphalos(1);
+	/* First clean_connection simu0->simu1 using local data */ 
+#ifdef DEBUG_MPI
+      if(LocTask == 0)
+	fprintf(stderr, "clean_connection() 1->0 (%d/%d) on task=%d\n", jchunk+1, TotTask, LocTask);
+#endif
 
-#ifdef WITH_OPENMP2
+#ifdef WITH_OPENMP
 #  pragma omp parallel for schedule (dynamic)	shared(nHalos) private(ihalo)
 #endif
-    for(ihalo=0; ihalo<nHalos[0]; ihalo++) {
-       clean_connection(ihalo, 0, 1, jchunk);
-     }
-       elapsed = clock()-elapsed;
-       fprintf(stderr," done in %4.2f sec\n", (double)elapsed/CLOCKS_PER_SEC);
-  }
-#endif /* End BOTH_WAYS */
+ 	 for(ihalo=0; ihalo<nHalos[0]; ihalo++)	
+ 	     clean_connection(ihalo, 0, 1, jchunk);
 
-	write_mtree(0, locOutFile[ifile]);  
+	  halos_mpiRecvBuffer[1] = NULL;
+
+	  MPI_Sendrecv(&nHalos[1], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
+                 &nHalosBuffer[1], sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+
+	  /* now swap the particles across all tasks - halos will be reconstructed locally later on */	
+	  halos_mpiRecvBuffer[1] = (HALO_MPIptr) calloc(nHalosBuffer[1], sizeof(HALO_MPI));
+
+	  MPI_Sendrecv(halos_mpi[1], nHalos[1] * sizeof(HALO_MPI), MPI_BYTE, RecvTask, 0, 
+	     halos_mpiRecvBuffer[1], nHalosBuffer[1] * sizeof(HALO_MPI), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+
+	  nHalos[1] = nHalosBuffer[1];
+	  halos_mpi[1] = halos_mpiRecvBuffer[1];
+	  elapsed = clock()-elapsed;
+
+    if(LocTask == 0)
+	  fprintf(stderr," done in %4.2f sec\n", (double)elapsed/CLOCKS_PER_SEC);
+  } /* End loop on jchunk of halos[1] */
+
+     free(ncroco_simu);
+
+     write_mtree(0, locOutFile[ifile]);  
+
+#endif /* MTREE_BOTH_WAYS*/
 
     /* be verbose */
     if(LocTask == 0)
@@ -454,13 +484,12 @@ int main(int argv, char **argc)
 
     /* make HaloFile[i+1] the new HaloFile[i] */
     nHalos[0] = nHalos[1];
-    halos[0]  = halos[1];
+    halos[0] = halos[1];
 
     /* be verbose */
     if(LocTask == 0)
     fprintf(stderr," done\n");
   } /* for(nFiles) */
-
 
   /*==================================================================*
    *                             CLEANUP                              *
@@ -475,16 +504,14 @@ int main(int argv, char **argc)
   {
      for(jfile=0; jfile<filesPerTask; jfile++)
      {
-        for(ifile=0; ifile<filesPerTask; ifile++)
+        for(ifile=0; ifile<nFiles; ifile++)
 	{
           if(locPartFile[jfile][ifile]) free(locPartFile[jfile][ifile]);
           if(locHaloFile[jfile][ifile]) free(locHaloFile[jfile][ifile]);
 	}
-
-          if(locPartFile[jfile]) free(locPartFile[jfile]);
-          if(locHaloFile[jfile]) free(locHaloFile[jfile]);
+        if(locPartFile[jfile]) free(locPartFile[jfile]);
+        if(locHaloFile[jfile]) free(locHaloFile[jfile]);
      }
-
      if(locPartFile) free(locPartFile);
      if(locHaloFile) free(locHaloFile);
   }
@@ -517,12 +544,12 @@ int main(int argv, char **argc)
  *==================================================================================================*/
 int load_balance(int isimu)
 {
-  int irecv=0, itask=0, nTaskPerSend=0, extraTask=0, buffer_pos_recv=0;
-  uint64_t ihalo=0, jhalo=0, ipart=0, jpart=0; 
+  int irecv=0, itask=0, nTaskPerSend=0, extraTask=0, buffer_pos_recv=0, ihalo=0, jhalo=0, ipart=0, jpart=0; 
   int *nRecvTasks=NULL, *sendTasks=NULL, **recvTasks=NULL, *nHalosBuffer=NULL;
-  uint64_t locNPart=0, **haloBuffer=NULL, *haloSendBuffer=NULL; 
+  uint64_t locNPart=0, **haloBuffer=NULL;
 
-  size_t sizeUInt64=0, sizeSendBuffer=0, sizeTempBuffer=0, sizeLocHalo=0, *sizeBuffer=NULL; 
+  size_t sizeUInt64=0, sizeSendBuffer=0, sizeTempBuffer=0, sizeLocHalo=0; 
+  size_t *sizeBuffer=NULL, *haloSendBuffer=NULL; 
 
   HALOptr temp_halo[2];
   int *buffer_position=NULL;
@@ -636,7 +663,7 @@ int load_balance(int isimu)
 #endif
 
       /* Each halo holds two uint64_t and two arrays Pid and Pindex */
-      sizeTempBuffer = 2 * sizeUInt64 * (halos[isimu][jhalo].npart + 1) + 3 * sizeof(double);
+      sizeTempBuffer = 2 * sizeUInt64 * (halos[isimu][jhalo].npart + 1) + 3 * sizeof(float);
 
       if(irecv == nRecvTasks[LocTask]) /* keep the halo locally */
       {
@@ -665,7 +692,7 @@ int load_balance(int isimu)
          MPI_Pack(&halos[isimu][jhalo].npart, sizeUInt64, MPI_BYTE, haloBuffer[irecv],
           sizeBuffer[irecv], &buffer_position[irecv], MPI_COMM_WORLD);
 
-         MPI_Pack(&halos[isimu][jhalo].Xc[0], 3 * sizeof(double), MPI_BYTE, haloBuffer[irecv],
+         MPI_Pack(&halos[isimu][jhalo].Xc[0], 3 * sizeof(float), MPI_BYTE, haloBuffer[irecv],
           sizeBuffer[irecv], &buffer_position[irecv], MPI_COMM_WORLD);
 
          MPI_Pack(&halos[isimu][jhalo].Pid[0], sizeLocHalo, MPI_BYTE, haloBuffer[irecv], 
@@ -715,8 +742,7 @@ int load_balance(int isimu)
    }
 
 #ifdef DEBUG_MPI
-   fprintf(stderr, "Task=%d is left with %"PRIu64" and %"PRIu64" particles.\n",
-	LocTask, nHalos[isimu], nPart[isimu]);
+   fprintf(stderr, "Task=%d is left with %"PRIu64" and %"PRIu64" particles.\n", LocTask, nHalos[isimu]);
 #endif
 
    free(temp_halo[isimu]);
@@ -798,7 +824,7 @@ int load_balance(int isimu)
  	sizeUInt64, MPI_BYTE, MPI_COMM_WORLD);
 
        MPI_Unpack(&haloSendBuffer[0], sizeSendBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Xc[0], 
- 	3 * sizeof(double), MPI_BYTE, MPI_COMM_WORLD);
+ 	3 * sizeof(float), MPI_BYTE, MPI_COMM_WORLD);
 
        locNPart = halos[isimu][ihalo].npart;
        sizeLocHalo = (size_t) locNPart * sizeUInt64;
@@ -813,7 +839,7 @@ int load_balance(int isimu)
       {
         halos[isimu][ihalo].Pindex[jpart] = ipart;
         ipart++;
-      }      
+      }
     }
 
    } /* if(LocTask >= NReadTask)*/
@@ -824,8 +850,8 @@ int load_balance(int isimu)
 	for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
 	  totHaloSizeTest += 2 * (1 + halos[isimu][ihalo].npart) * sizeUInt64;
 
-	fprintf(stderr, "\nDone load balancing.\nTask=%d has %"PRIu64" halos and %"PRIu64" particles, size=%zd.\n", 
-		LocTask, nHalos[isimu], nPart[isimu], totHaloSizeTest);
+	fprintf(stderr, "\nDone load balancing.\nTask=%d has %"PRIu64" halos, total size=%zd.\n", 
+		LocTask, nHalos[isimu], totHaloSizeTest);
 #endif
 
   /* Now free local buffers */
@@ -844,68 +870,103 @@ int load_balance(int isimu)
 }
 
 
+
+int order_halo_ids(int isimu)
+{
+   uint64_t ihalo=0, locNPart=0;
+ 
+   for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
+    {
+      /* Store the ordered IDs for successive comparison */
+      locNPart = halos[isimu][ihalo].npart;
+      halos[isimu][ihalo].Pidord = calloc(locNPart, sizeof(uint64_t));
+      memcpy(halos[isimu][ihalo].Pidord, halos[isimu][ihalo].Pid, locNPart * sizeof(uint64_t));   
+      qsort(halos[isimu][ihalo].Pidord, locNPart, sizeof(uint64_t), &cmpfunc);
+    } 
+
+  return 1;
+}
+
+
 /*
  * This function swaps the halo structures across the tasks using the MPI_Pack / MPI_Unpack functions 
  * to be able to send dynamically allocated data.
  */
 int MPI_Swaphalos(int isimu)
 {
-  int buffer_nhalos=0, buffer_pos_recv=0, buffer_position=0, ihalo=0; //jhalo=0, ipart=0, jpart=0; 
+  int buffer_pos_recv=0, buffer_position=0, ihalo=0; //jhalo=0, ipart=0, jpart=0; 
   size_t sizeUInt64=0, sizeSendBuffer=0, sizeRecvBuffer=0, sizeLocHalo=0; 
-  uint64_t *haloSendBuffer=NULL, *haloRecvBuffer=NULL, locNPart=0, buffer_nhalo=0; 
+  //uint64_t *haloSendBuffer=NULL, *haloRecvBuffer=NULL, locNPart=0; 
+  void *haloSendBuffer=NULL, *haloRecvBuffer=NULL;
+  uint64_t locNPart=0; 
 
   sizeUInt64 = sizeof(uint64_t);
 
-    /* Figure out how much every task has to send */
-    haloSendBuffer = (uint64_t *) calloc(1, sizeof(uint64_t)); 
+#ifdef DEBUG_MPI
+    fprintf(stderr, "MPI_Swapping halo[%d] to task=%d from task=%d.\n", isimu, LocTask, SendTask);
+#endif
+
+    /* Init buffers */
+    haloSendBuffer = (void *) malloc(1); 
+    haloRecvBuffer = (void *) malloc(1); 
 
     /* Loop over haloes and assign them to the different tasks, packing them into separate buffers */
-    for(ihalo=1; ihalo<=nHalos[isimu]; ihalo++)
+    for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
     {
       locNPart = halos[isimu][ihalo].npart;
       sizeLocHalo = locNPart * sizeUInt64; 
 
       /* Each halo holds two uint64_t, two arrays Pid and Pindex, plus the coordinates */
-      sizeSendBuffer += 2 * sizeUInt64 * (locNPart + 1) + 3 * sizeof(double);
-      haloSendBuffer = (uint64_t *) realloc(haloSendBuffer, sizeSendBuffer);
+      sizeSendBuffer += sizeUInt64 * (locNPart + 2) + 3 * sizeof(float);
+      //sizeSendBuffer += 2 * sizeUInt64 + 3 * sizeof(float);
+      haloSendBuffer = (void *) realloc(haloSendBuffer, sizeSendBuffer);
+
+//	fprintf(stderr, "size send = %zd npart = %"PRIu64" locsize = %zd\t", sizeSendBuffer, locNPart, sizeLocHalo );
 
       /* Pack the halo and particles information into a single buffer */
-      MPI_Pack(&halos[isimu][ihalo].haloid, 2 * sizeUInt64, MPI_BYTE, haloSendBuffer,
+      MPI_Pack(&halos[isimu][ihalo].haloid, sizeUInt64, MPI_BYTE, haloSendBuffer,
         sizeSendBuffer, &buffer_position, MPI_COMM_WORLD);
 
-      MPI_Pack(&halos[isimu][ihalo].Xc[0], 3 * sizeof(double), MPI_BYTE, haloSendBuffer,
+      MPI_Pack(&halos[isimu][ihalo].npart, sizeUInt64, MPI_BYTE, haloSendBuffer,
         sizeSendBuffer, &buffer_position, MPI_COMM_WORLD);
 
-      MPI_Pack(&halos[isimu][ihalo].Pid[0], 2 * sizeLocHalo, MPI_BYTE, haloSendBuffer, 
+      MPI_Pack(&halos[isimu][ihalo].Xc[0], 3 * sizeof(float), MPI_BYTE, haloSendBuffer,
+        sizeSendBuffer, &buffer_position, MPI_COMM_WORLD);
+
+      MPI_Pack(&halos[isimu][ihalo].Pid[0], sizeLocHalo, MPI_BYTE, haloSendBuffer, 
         sizeSendBuffer, &buffer_position, MPI_COMM_WORLD);
 	
       /* Free Pid and Pindex space once it's packed */
       free(halos[isimu][ihalo].Pid);
-      free(halos[isimu][ihalo].Pindex);
 
+#ifdef TEST
+      free(halos[isimu][ihalo].Pindex);
+      free(halos[isimu][ihalo].Pidord);
+#endif
     } /* for ihalo */
 
-#ifdef DEBUG_MPI
-   fprintf(stderr, "Task=%d is left with %"PRIu64" and %"PRIu64" particles.\n",
-	LocTask, nHalos[isimu], nPart[isimu]);
-#endif
+   fprintf(stderr, "nhalos to be sent %"PRIu64" loc_send_size = %zd bytes, recv=%d send=%d\n", 
+		nHalos[isimu], sizeSendBuffer, LocTask, SendTask);
 
    MPI_Sendrecv(&nHalos[isimu], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
-                &buffer_nhalo,  sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+                &nHalosBuffer[isimu],  sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
 
    MPI_Sendrecv(&sizeSendBuffer, sizeof(size_t), MPI_BYTE, RecvTask, 0,
                 &sizeRecvBuffer, sizeof(size_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
 
-   free(halos[isimu]);
+   fprintf(stderr, "nhalos to recieve %"PRIu64" loc_recv_size = %zd bytes, recv=%d send=%d\n", 
+		nHalosBuffer[isimu], sizeRecvBuffer, RecvTask, LocTask);
 
-   haloRecvBuffer = (uint64_t *) malloc(sizeRecvBuffer);
-   nHalos[isimu] = buffer_nhalos;
+//   free(halos[isimu]);
 
-   MPI_Sendrecv(&haloSendBuffer, sizeof(size_t), MPI_BYTE, RecvTask, 0,
-                &haloRecvBuffer, sizeof(size_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
+   haloRecvBuffer = malloc(sizeRecvBuffer);
+   nHalos[isimu] = nHalosBuffer[isimu];
+
+   MPI_Sendrecv(haloSendBuffer, sizeSendBuffer, MPI_BYTE, RecvTask, 0,
+                haloRecvBuffer, sizeRecvBuffer, MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
 
 	// TODO may give segfault problems
-   free(haloSendBuffer);
+  // free(haloSendBuffer);
 
 #ifdef DEBUG_MPI
     fprintf(stderr, "Task=%d has done packing data, local data size is now=%zd, with %"PRIu64" halos.\n", 
@@ -916,35 +977,57 @@ int MPI_Swaphalos(int isimu)
 #endif
 
     /* Now unpack halos particles information from the buffers into the halos structures */
-    halos[isimu]   = (HALOptr) calloc(nHalos[isimu], sizeof(HALOS));
+    halos[isimu] = (HALOptr) calloc(nHalos[isimu], sizeof(HALOS));
     buffer_pos_recv = 0;
 
     for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
     {
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].haloid, 
+       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].haloid, 
 	sizeUInt64, MPI_BYTE, MPI_COMM_WORLD);
 	
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].npart, 
+       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].npart, 
  	sizeUInt64, MPI_BYTE, MPI_COMM_WORLD);
 
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Xc[0], 
- 	3 * sizeof(double), MPI_BYTE, MPI_COMM_WORLD);
+       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Xc[0], 
+ 	3 * sizeof(float), MPI_BYTE, MPI_COMM_WORLD);
 
        locNPart = halos[isimu][ihalo].npart;
        sizeLocHalo = (size_t) locNPart * sizeUInt64;
 
+	uint64_t *memtest;
+       memtest= (uint64_t *) malloc(sizeLocHalo);
+
        halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeLocHalo);
+       halos[isimu][ihalo].Pidord = (uint64_t *) malloc(sizeLocHalo);
        halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeLocHalo);
 
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pid[0], 
+//	fprintf(stderr, "Halo[%d] on task %d ID=%"PRIu64" has npart %"PRIu64"\n", ihalo, LocTask, 
+//		halos[isimu][ihalo].haloid, locNPart);
+
+//       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &memtest[0], 
+//        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
+
+       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pid[0], 
+        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
+
+#ifdef TEST
+       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pidord[0], 
         sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
 
        MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pindex[0], 
         sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
+#endif
    } /* if(LocTask >= NReadTask)*/
 
+#ifdef DEBUG_MPI
+    fprintf(stderr, "Task=%d has recived data, local data size is now=%zd, with %"PRIu64" halos.\n", 
+	LocTask, sizeRecvBuffer, nHalos[isimu]);
+#endif
+
+#ifdef TEST
   /* Now free local buffers */
-  free(haloRecvBuffer);
+  free(haloRecvBuffer); // FIXME
+#endif
 
   return(1);
 }
@@ -972,10 +1055,10 @@ int assign_input_files_to_tasks(char *partList, char *haloList, char *tempDir, c
   char dummy[MAXSTRING-1];
   char task[6];
   
-//  if(LocTask == 0)
+  if(LocTask == 0)
     fprintf(stderr, "\n  o assigning files to each task from %s and %s\n", partList, haloList);
 
-//  locPartList[MAXSTRING] = (char *) calloc(filesPerTask, sizeof(char));
+  locPartList[MAXSTRING] = (char *) calloc(filesPerTask, sizeof(char));
 
   if(LocTask < NReadTask)
   {
@@ -1072,10 +1155,10 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   FILE     *fpin;
   char      line[MAXSTRING];
   int64_t   ihalo;
-  uint64_t  ipart, Pid, Pindex, Ptype, haloid, nPartInHalo, nPart[3], nPartInUse;
-  time_t    elapsed = (time_t)0;
+  uint64_t  nPartInHalo, nPartInUse, ipart, Pid, Pindex, Ptype, haloid;
+  clock_t    elapsed = (clock_t)0;
 
-  elapsed -= time(NULL);
+  elapsed = clock();
 
 #ifdef DEBUG_MPI
     fprintf(stderr,"  o reading file %s on task %d ...\n",filename, LocTask);
@@ -1111,12 +1194,13 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   if(ifile == 0)
       Pindex = 0;
   else
-      Pindex = nPart[isimu];
+      Pindex++;
 
   do {
     if(strncmp(line,"#",1) != 0)
      {
       /* has a haloid been written */
+#ifndef READ_HALO_ID_FROM_FILE
       if(sscanf(line,"%"SCNu64" %"SCNu64, &nPartInHalo, &haloid) == 1)
        {
         /* if not, just get the number of particles */
@@ -1126,14 +1210,23 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
         haloid = constructHaloId((uint64_t)(ihalo+1)); // +1, because ihalo has not been incremented yet!
 
        }
-      
+#else
+      if(sscanf(line,"%"SCNu64" %"SCNu64, &nPartInHalo) == 1)
+       {
+        /* if not, just get the number of particles */
+        sscanf(line,"%"SCNu64, &nPartInHalo);
+       }
+#endif
+
       /* found yet another halo */
       ihalo++;
       nHalosTmp[isimu] += 1;
       halos_tmp[isimu]   = (HALOptr) realloc(halos_tmp[isimu], nHalosTmp[isimu]*sizeof(HALOS));
 
+#ifndef READ_HALO_ID_FROM_FILE
       /* store haloid */
       halos_tmp[isimu][ihalo].haloid = haloid;
+#endif
       
       /* halos_tmp[][].Pid will be incrementally filled using realloc() */
       halos_tmp[isimu][ihalo].Pid = NULL;
@@ -1171,6 +1264,7 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
 
           halos_tmp[isimu][ihalo].Pid[nPartInUse] = Pid;
           halos_tmp[isimu][ihalo].Pindex[nPartInUse] = Pindex;
+          nPartInUse++;
 	  Pindex++;
          }
        }
@@ -1179,14 +1273,14 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
       halos_tmp[isimu][ihalo].npart = nPartInUse;  
 
       /* add to the total number of particles on task, plus the haloid and haloindex */    
-      totHaloSizeTmp += 2 * (nPartInUse + 1) * sizeof(uint64_t) + 3 * sizeof(double);
+      totHaloSizeTmp += 2 * (nPartInUse + 1) * sizeof(uint64_t) + 3 * sizeof(float);
      }
 
   } while( fgets(line,MAXSTRING,fpin) != NULL);
  
   fclose(fpin);
   
-  elapsed += time(NULL);
+  elapsed = clock();
 
   if(LocTask == 0)
    fprintf(stderr,"\n done in %ld sec, temp num halos=%"PRIu64", total temp halo size=%zd kb.\n", 
@@ -1235,6 +1329,7 @@ int read_positions(char filename[MAXSTRING], int isimu)
        sscanf(line,"%"SCNu64" %"SCNu64" %d %lf %d %lf %lf %lf", 
 	&ID_dummy, &Host_dummy, &Nsub_dummy, &Mvir_dummy, &Npart_dummy, &Xc, &Yc, &Zc);
        
+          halos_tmp[isimu][ihalo].haloid = ID_dummy;
           halos_tmp[isimu][ihalo].Xc[0] = Xc;
           halos_tmp[isimu][ihalo].Xc[1] = Yc;
           halos_tmp[isimu][ihalo].Xc[2] = Zc;
@@ -1286,7 +1381,11 @@ int cross_correlation(int iloop, int isimu0, int isimu1)
    * take into account that simu1 is split in TotTask files, and we now are
    * creating the m_tree for the iloop-th one
    *  */
-  for(ihalo=0; ihalo<nHalos[isimu0]; ihalo++) {
+  for(ihalo=0; ihalo<nHalos[isimu0]; ihalo++) 
+  {
+#ifdef USE_HALO_MIN_PART
+    if(halos[isimu0][ihalo].npart > HALO_MIN_PART)
+#endif
         create_mtree(ihalo, isimu0, isimu1, iloop);
 
         if(ihalo == count) 
@@ -1304,7 +1403,6 @@ int cross_correlation(int iloop, int isimu0, int isimu1)
   
   if(LocTask == 0)
 	  fprintf(stderr," done in %4.2f sec.\n", (double)elapsed/CLOCKS_PER_SEC);
-
 
   return(1);
 }
@@ -1326,12 +1424,12 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
     halos[isimu0][ihalo].mtree  = (MTREEptr) calloc(1, sizeof(MTREE)); 
     halos[isimu0][ihalo].global_ncroco = 0;  
   }
-  
+  	
   /* common[] records how many particles ihalo(isimu0) has in common with khalo(isimu1) */
   common = (uint64_t *) calloc(nHalos[isimu1], sizeof(uint64_t));
 
 /* use this custom linear algorithm to check for the matching particles */
-#ifdef WITH_OMP
+#ifdef WITH_OPENMP
   omp_set_num_threads(NUM_OMP_THREADS);
 #pragma omp parallel for private(khalo) shared(nHalos, common, ihalo, isimu0, isimu1)
 #endif
@@ -1339,7 +1437,9 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
   {
     /* Only take into account pairs of haloes closer than MAX_HALO_DIST*/
 #ifndef DISABLE_MAX_HALO_DISTANCE
-    if (compute_com_distance(ihalo, khalo) == 1)
+    if (compute_com_distance(ihalo, khalo, isimu0, isimu1) == 1)
+#else
+	if(ihalo==0 && khalo==0 && LocTask ==0) fprintf(stderr, "\nComputing halo cross correlation with no distance cutoff.\n");
 #endif
        intersection(isimu0, isimu1, ihalo, khalo, common);
   }
@@ -1348,7 +1448,11 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
   ncroco = 0;
   for(khalo=0; khalo<nHalos[isimu1]; khalo++) {
     if(common[khalo] > MINCOMMON)
+	{
       ncroco++;
+
+//	fprintf(stderr, "ihalo=%llu ncroco= %llu, MinCommon %llu khalo = %llu\n", ihalo, ncroco, common[khalo], khalo);
+	}
   }
 
   /* Update the number of connections found in total - ncroco only holds the LOCAL connections */
@@ -1387,74 +1491,6 @@ int create_mtree(uint64_t ihalo, int isimu0, int isimu1, int iloop)
     if(common) free(common);
 
   return(1);
-}
-
-
-
-int order_by_merit(int isimu0)
-{
-  MTREE    *mtree;
-  
-  uint64_t ihalo, icroco;
-  uint64_t npart[2], jcroco, ncroco, common;
-  double *merit;
-  long unsigned *idx;
-
-  npart[0] = 0;
-  npart[1] = 0;
-
-    /* Order haloes in mtree by merit function */
-    for(ihalo=0; ihalo<nHalos[isimu0]; ihalo++) 
-    {
-      ncroco = halos[isimu0][ihalo].global_ncroco;
-
-      mtree  = (MTREEptr)        calloc(ncroco, sizeof(MTREE));
-      merit = (double *) calloc(ncroco, sizeof(double));
-      idx   = (long unsigned *) calloc(ncroco, sizeof(long unsigned));
-
-      if(ncroco > 0)
-      {
-	for(icroco=0; icroco<ncroco; icroco++)
-        {
-          common = halos[isimu0][ihalo].mtree[icroco].common;
-          npart[0] = halos[isimu0][ihalo].mtree[icroco].npart[0]; 
-          npart[1] = halos[isimu0][ihalo].mtree[icroco].npart[1]; 
-
-          mtree[icroco].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
-          mtree[icroco].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
-          mtree[icroco].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
-          mtree[icroco].common    = halos[isimu0][ihalo].mtree[icroco].common;
-          mtree[icroco].id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
-          mtree[icroco].haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
-          mtree[icroco].npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
-
-          merit[icroco] = pow2((double)common)/((double)npart[0]*(double)npart[1]);
-	} 
-
-	    /* order by merit function */
-	    indexx((long unsigned)ncroco, merit-1, idx-1);
-	
-	/* Free the mtree of halos and realloc it from scratch so we can store the tree in the right order */
-	free(halos[isimu0][ihalo].mtree);
-	halos[isimu0][ihalo].mtree = (MTREEptr) calloc(ncroco, sizeof(MTREE));
-
-	/* Now gather again the */
-        for(jcroco=0; jcroco<ncroco; jcroco++)
-        {
-          icroco = idx[ncroco-1-jcroco]-1;
-
-	  halos[isimu0][ihalo].mtree[jcroco].id[0] = mtree[icroco].id[0];
-	  halos[isimu0][ihalo].mtree[jcroco].haloid[0] = mtree[icroco].haloid[0];
-	  halos[isimu0][ihalo].mtree[jcroco].npart[0] = mtree[icroco].npart[0];
-	  halos[isimu0][ihalo].mtree[jcroco].common = mtree[icroco].common;
-	  halos[isimu0][ihalo].mtree[jcroco].id[1] = mtree[icroco].id[1];
-	  halos[isimu0][ihalo].mtree[jcroco].haloid[1] = mtree[icroco].haloid[1];
-	  halos[isimu0][ihalo].mtree[jcroco].npart[1] = mtree[icroco].npart[1];
-        }
-      }
-    }
-
-  return(0);
 }
 
 
@@ -1560,103 +1596,260 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
 }
 
 /* Computes the distance of the center of mass of two given halos. If their distance is larger than MAX
-   then the comparison will be skipped. Assumes kpc units.
+ * then the comparison will be skipped. Assumes kpc units.
  */
-int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1)
+int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1, int isimu0, int isimu1)
 {
-  int Dist = 0;
-  double Xc0, Xc1, Yc0, Yc1, Zc0, Zc1;
-  double D0, D1, D2, D3, D4, D5, D6, D7;
-	
-	Xc0 = halos[0][ihalo0].Xc[0];
-	Xc1 = halos[1][ihalo1].Xc[0];
-	Yc0 = halos[0][ihalo0].Xc[1];
-	Yc1 = halos[1][ihalo1].Xc[1];
-	Zc0 = halos[0][ihalo0].Xc[2];
-	Zc1 = halos[1][ihalo1].Xc[2];
+  int Dist = 0, icoord = 0;
+  float X0[3], X1[3], dX[3], dbox, dx, dSum, dDist;
 
-    D0 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
+  for(icoord = 0; icoord < 3; icoord++)
+  {
+    X0[icoord] = halos[isimu0][ihalo0].Xc[icoord];
+    X1[icoord] = halos[isimu1][ihalo1].Xc[icoord];
+  }
+  
+  dSum = 0;
 
-    D1 = sqrt( pow2(MOD(Xc0 - Xc1) - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1));
-    D6 = sqrt( pow2(Xc0 - Xc1) + pow2(MOD(Yc0 - Yc1) - BoxSize) + pow2(Zc0 - Zc1));
-    D5 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1) + pow2(MOD(Zc0 - Zc1) - BoxSize));
+  for(icoord = 0; icoord < 3; icoord++)
+  {
+    dx = X1[icoord] - X0[icoord];
+    dx = sqrt(dx * dx);
 
-    D2 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1));
-    D4 = sqrt( pow2(Xc0 - Xc1) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
-    D7 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1) + pow2(Zc0 - Zc1 - BoxSize));
+    if(X0[icoord] > X1[icoord])
+      dbox = (BoxSize - X0[icoord]) + X1[icoord];
+    else
+      dbox = (BoxSize - X1[icoord]) + X0[icoord];
 
-    D3 = sqrt( pow2(Xc0 - Xc1 - BoxSize) + pow2(Yc0 - Yc1 - BoxSize) + pow2(Zc0 - Zc1 - BoxSize));
+    if(dx < dbox)
+      dX[icoord] = dx;
+    else
+      dX[icoord] = dbox;
 
-//  fprintf(stderr, "h1=%llu h2=%llu x1=%lf x2=%lf d=%lf\n", ihalo0, ihalo1, Xc0, Xc1, Dist);
+    dSum += pow2(dX[icoord]);
+  }
 
-	/* Check for periodic boundary conditions */
-   if( D0 < MAX_HALO_DIST || D1 < MAX_HALO_DIST || D2 < MAX_HALO_DIST 
-    || D3 < MAX_HALO_DIST || D4 < MAX_HALO_DIST || D5 < MAX_HALO_DIST 
-    || D6 < MAX_HALO_DIST || D7 < MAX_HALO_DIST )
-				Dist = 1;
+  dDist = sqrt(dSum);
 
-		//if(Dist == 1 && D0 > MAX_HALO_DIST && D1 > MAX_HALO_DIST && D5 > MAX_HALO_DIST)
-/*		if(Dist == 1 && D0 > MAX_HALO_DIST)
-	fprintf(stderr, "Crossed Boundary Conditions h1=%llu h2=%llu x1=%lf x2=%lf y1=%lf y2=%lf z1=%lf z2=%lf\n", 
-		halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, Xc0, Xc1, Yc0, Yc1, Zc0, Zc1);
-*/	
-//	else
-//	fprintf(stderr, "H1=%llu h2=%llu X1=%lf X2=%lf y1=%lf y2=%lf\n", halos[0][ihalo0].haloid, halos[1][ihalo1].haloid, 
-
+  if(dDist < MAX_HALO_DIST)
+    Dist = 1;
   return Dist;
 }
 
 
+int copy_halos(int isimu0, int isimu1)
+{
+   uint64_t ihalo, npart;
+   size_t sizeHalo;
 
+   for(ihalo = 0; ihalo<nHalos[isimu1]; ihalo++)
+   {
+   //  fprintf(stderr, "ihalo=%llu, task=%d, npart=%llu, idhalo=%llu simu=%d nhalos=%llu\n", 
+   //ihalo, LocTask,halos[isimu1][ihalo].npart, halos[isimu0][ihalo].haloid, isimu1, nHalos[isimu1]);
+      npart = halos[isimu0][ihalo].npart;
+      halos[isimu1][ihalo].npart = halos[isimu0][ihalo].npart;
+      halos[isimu1][ihalo].haloid = halos[isimu0][ihalo].haloid;
+      memcpy(halos[isimu1][ihalo].Xc, halos[isimu0][ihalo].Xc, 3 * sizeof(float));
+
+      sizeHalo = npart * sizeof(uint64_t);
+ 
+      halos[isimu1][ihalo].mtree = NULL;
+      halos[isimu1][ihalo].Pid = (uint64_t *) malloc(sizeHalo);
+      halos[isimu1][ihalo].Pidord = (uint64_t *) malloc(sizeHalo);
+      halos[isimu1][ihalo].Pindex = (uint64_t *) malloc(sizeHalo);
+
+      memcpy(halos[isimu1][ihalo].Pid, halos[isimu0][ihalo].Pid, sizeHalo);   
+      memcpy(halos[isimu1][ihalo].Pidord, halos[isimu0][ihalo].Pidord, sizeHalo);
+      memcpy(halos[isimu1][ihalo].Pindex, halos[isimu0][ihalo].Pindex, sizeHalo);
+   }
+
+  return 1;
+}
+
+
+/* We copy the "static" part of the HALOS structure into a HALO_MPI type which can be easily handled in MPI communication */
+int copy_halos_to_halos_mpi(int isimu1)
+{
+   uint64_t ihalo;
+   size_t sizeHaloMpi;
+   sizeHaloMpi = 2 * sizeof(uint64_t) + 3 * sizeof(float);
+
+  for(ihalo = 0; ihalo<nHalos[isimu1]; ihalo++)
+  {
+	/*halos_mpi[isimu1][ihalo].npart = halos[isimu1][ihalo].npart; 
+	halos_mpi[isimu1][ihalo].haloid = halos[isimu1][ihalo].haloid; 
+	halos_mpi[isimu1][ihalo].Xc[0] = halos[isimu1][ihalo].Xc[0]; 
+	halos_mpi[isimu1][ihalo].Xc[1] = halos[isimu1][ihalo].Xc[1]; 
+	halos_mpi[isimu1][ihalo].Xc[2] = halos[isimu1][ihalo].Xc[2]; 
+	*/
+     memcpy(&halos_mpi[isimu1][ihalo].haloid, &halos[isimu1][ihalo].haloid, sizeHaloMpi); 
+     halos_mpi[isimu1][ihalo].ncroco = halos[isimu1][ihalo].global_ncroco; 
+     halos_mpi[isimu1][ihalo].haloid_max_merit = halos[isimu1][ihalo].mtree[0].haloid[1]; 
+     halos_mpi[isimu1][ihalo].id_max_merit = halos[isimu1][ihalo].mtree[0].id[1]; 
+
+//	fprintf(stderr, "simu=%d, copy halo=%llu max_merit_id=%llu index_max=%llu\n",
+//	isimu1, halos[isimu1][ihalo].haloid, halos_mpi[isimu1][ihalo].haloid_max_merit, halos[isimu1][ihalo].mtree[0].id[1]);
+		//if( halos[1][ihalo].mtree != NULL) free(halos[1][ihalo].mtree);
+  }
+
+  return(0);
+}		
+
+
+
+int order_by_merit(int isimu0)
+{
+  MTREE    *mtree;
+  
+  uint64_t  ihalo, icroco, npart[2], jcroco, ncroco, common;
+  double *merit;
+  long unsigned *idx;
+
+  npart[0] = 0;
+  npart[1] = 0;
+
+    /* Order haloes in mtree by merit function */
+    for(ihalo=0; ihalo<nHalos[isimu0]; ihalo++) 
+    {
+      ncroco = halos[isimu0][ihalo].global_ncroco;
+
+      mtree  = (MTREEptr)        calloc(ncroco, sizeof(MTREE));
+      merit = (double *) calloc(ncroco, sizeof(double));
+      idx   = (long unsigned *) calloc(ncroco, sizeof(long unsigned));
+
+      if(ncroco > 0)
+      {
+	for(icroco=0; icroco<ncroco; icroco++)
+        {
+          common = halos[isimu0][ihalo].mtree[icroco].common;
+          npart[0] = halos[isimu0][ihalo].mtree[icroco].npart[0]; 
+          npart[1] = halos[isimu0][ihalo].mtree[icroco].npart[1]; 
+
+          mtree[icroco].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
+          mtree[icroco].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
+          mtree[icroco].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
+          mtree[icroco].common    = halos[isimu0][ihalo].mtree[icroco].common;
+          mtree[icroco].id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
+          mtree[icroco].haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
+          mtree[icroco].npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
+
+          merit[icroco] = pow2((double)common)/((double)npart[0]*(double)npart[1]);
+	} 
+
+	    /* order by merit function */
+	    indexx((long unsigned)ncroco, merit-1, idx-1);
+	
+	/* Free the mtree of halos and realloc it from scratch so we can store the tree in the right order */
+	free(halos[isimu0][ihalo].mtree);
+	halos[isimu0][ihalo].mtree = (MTREEptr) calloc(ncroco, sizeof(MTREE));
+
+	/* Now gather again the */
+        for(jcroco=0; jcroco<ncroco; jcroco++)
+        {
+          icroco = idx[ncroco-1-jcroco]-1;
+
+	  halos[isimu0][ihalo].mtree[jcroco].id[0] = mtree[icroco].id[0];
+	  halos[isimu0][ihalo].mtree[jcroco].haloid[0] = mtree[icroco].haloid[0];
+	  halos[isimu0][ihalo].mtree[jcroco].npart[0] = mtree[icroco].npart[0];
+	  halos[isimu0][ihalo].mtree[jcroco].common = mtree[icroco].common;
+	  halos[isimu0][ihalo].mtree[jcroco].id[1] = mtree[icroco].id[1];
+	  halos[isimu0][ihalo].mtree[jcroco].haloid[1] = mtree[icroco].haloid[1];
+	  halos[isimu0][ihalo].mtree[jcroco].npart[1] = mtree[icroco].npart[1];
+        }
+      }
+    }
+
+  return(0);
+}
+
+#ifdef MTREE_BOTH_WAYS
+
+#ifndef OLD_CLEAN_CONNECTION
+/* Once the connection has been established backwards and forwards, determine the unique descendant of each halo */
 int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
 {
   uint64_t jhalo, khalo, icroco, loc_croco;
 
   if (iloop == 0)
   {
-     /* count number of new crocos */
-     ncroco_simu[0][ihalo] = 0;
-     mtree_tmp[isimu0] = (MTREEptr **) calloc(1, sizeof(MTREEptr *));
+     /* init number count of new crocos */
+     ncroco_simu[ihalo] = 0;
+     mtree_tmp[ihalo]  = (MTREEptr) calloc(1, sizeof(MTREE));
   }
   
-  loc_croco = ncroco_simu[0][ihalo];
-
-  for(khalo=0; khalo<nHalos[1]; khalo++)
-  {
+  loc_croco = ncroco_simu[ihalo];
 
     /* first make sure that the halo DOES have a connection */
-    if(ncroco_simu[1][khalo] > 0)
-#ifndef DISABLE_MAX_HALO_DISTANCE
+    //if(halos_mpi[isimu1][khalo].ncroco > 0)
+//fprintf(stderr, "Halo=%llu has %llu ncroco\n", halos_mpi[isimu1][khalo].haloid, halos_mpi[isimu1][khalo].ncroco);
 	/* first check if the halo is in the range */
-     if (compute_com_distance(ihalo, khalo) == 1)
-#endif
-     for(icroco=0; icroco<halos[isimu0][ihalo].ncroco; icroco++) 
+     //if (compute_com_distance(ihalo, khalo) == 1)
+     for(icroco=0; icroco<halos[isimu0][ihalo].global_ncroco; icroco++) 
      {
-       jhalo = halos[isimu0][ihalo].mtree[icroco].haloid[1];
-  
-	/* check if the first entry in the sim1 halo merger tree is equal to the current halo */
-        if(jhalo == mtree_tmp[isimu1][khalo][0]->haloid[1]) // FIXME replace with HALO_MPI
-	{
-	/* copy the new mtree accoring to the max merit */
-	    mtree_tmp[0][ihalo]  = (MTREEptr *) realloc(mtree_tmp[0][ihalo], (loc_croco+1)*sizeof(MTREEptr));
- 	    mtree_tmp[0][ihalo][loc_croco-1]->id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
-            mtree_tmp[0][ihalo][loc_croco-1]->haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
-	    mtree_tmp[0][ihalo][loc_croco-1]->npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
-	    mtree_tmp[0][ihalo][loc_croco-1]->common    = halos[isimu0][ihalo].mtree[icroco].common;
-	    mtree_tmp[0][ihalo][loc_croco-1]->id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
-	    mtree_tmp[0][ihalo][loc_croco-1]->haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
-	    mtree_tmp[0][ihalo][loc_croco-1]->npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
+	/* this ID was local, however, we did not change the order of haloes in the halos_mpi files
+         * so this should still identify the local halo position in the right chunk
+         */
+          jhalo = halos[isimu0][ihalo].mtree[icroco].id[1];
+          //khalo = halos[isimu0][ihalo].mtree[icroco].haloid[1];
+          khalo = halos[isimu0][ihalo].haloid;
 
-	   // jhalo = 0;
+	//if(icroco>10)
+   //fprintf(stderr, "ihalo=%llu, jhalo=%llu corresponds to khalo= %llu , global_croco=%llu max= %llu\n", 
+//	ihalo, jhalo, khalo, halos[isimu0][ihalo].global_ncroco, halos_mpi[isimu1][jhalo].haloid_max_merit); 
+
+	/* check if the first entry in the sim1 halo merger tree is equal to the current halo */
+        //if(ihalo == halos_mpi[isimu1][jhalo].id_max_merit) 
+        //if(halos[isimu0][ihalo].haloid == halos_mpi[isimu1][jhalo].haloid_max_merit) 
+        if(khalo == halos_mpi[isimu1][jhalo].haloid_max_merit) 
+        //if(max_merit(jhalo, isimu1) == ihalo) 
+	{
+	    /* copy the new mtree accoring to the max merit */
+	    ncroco_simu[ihalo]++;
+	    loc_croco = ncroco_simu[ihalo];
+	//   fprintf(stderr, "ihalo=%llu -> jhalo=%llu corresponds to max merit %llu,loc croco=%llu\n", 
+	//	ihalo, jhalo, halos_mpi[isimu1][jhalo].haloid_max_merit, loc_croco);
+	       mtree_tmp[ihalo] = (MTREE *) realloc(mtree_tmp[ihalo], (loc_croco) * sizeof(MTREE));
+	       mtree_tmp[ihalo][loc_croco-1].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
+               mtree_tmp[ihalo][loc_croco-1].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
+	       mtree_tmp[ihalo][loc_croco-1].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
+	       mtree_tmp[ihalo][loc_croco-1].common    = halos[isimu0][ihalo].mtree[icroco].common;
+	       mtree_tmp[ihalo][loc_croco-1].id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
+	       mtree_tmp[ihalo][loc_croco-1].haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
+	       mtree_tmp[ihalo][loc_croco-1].npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
+	       jhalo = 0;
 	}
      }
+
+  /* replace halos[isimu0][ihalo].mtree[] with new structure array on the last loop */
+  if (iloop == TotTask-1)
+  {
+    if(halos[isimu0][ihalo].mtree != NULL)
+    {
+       free(halos[isimu0][ihalo].mtree);
+         halos[isimu0][ihalo].mtree = NULL;
+    }
+
+    halos[isimu0][ihalo].global_ncroco = ncroco_simu[ihalo];
+    halos[isimu0][ihalo].mtree = mtree_tmp[ihalo];
+
+//fprintf(stderr, "(%d/%d) Clean connection, halo %llu ID = %llu has %llu/%llu cross correlations\n", 
+//	iloop, TotTask, ihalo, halos[isimu0][ihalo].haloid, ncroco_simu[ihalo], halos[isimu0][ihalo].global_ncroco);
   }
 
-#ifdef OLD_CLEAN_CON
+  return 1;
+}
+
+#else
+int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
+{
+  uint64_t jhalo, icroco, loc_croco;
+  //MTREE    *mtree;
+  //mtree      = NULL;
+
   if (iloop == 0)
   {
      /* count number of new crocos */
-     ncroco_simu[1] = 0;
+     ncroco_simu[ihalo] = 0;
      mtree_tmp[isimu0] = (MTREEptr) calloc(1, sizeof(MTREE));
   }  
 
@@ -1667,15 +1860,16 @@ int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
     /* check whether the present halo is the most likely descendant of this progenitor */
     if(max_merit(jhalo, isimu1) == ihalo) {
       // keep jhalo in mtree-list
-      ncroco_simu[0]++;
-      mtree_tmp[0] = (MTREEptr) realloc(mtree_tmp[0], (ncroco_simu[1]+1)*sizeof(MTREE));
-      mtree_tmp[ncroco_simu[0]-1][0].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
-      mtree_tmp[ncroco_simu[0]-1][0].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
-      mtree_tmp[ncroco_simu[0]-1][0].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
-      mtree_tmp[ncroco_simu[0]-1][0].common    = halos[isimu0][ihalo].mtree[icroco].common;
-      mtree_tmp[ncroco_simu[0]-1][0].id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
-      mtree_tmp[ncroco_simu[0]-1][0].haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
-      mtree_tmp[ncroco_simu[0]-1][0].npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
+      ncroco_simu[ihalo]++;
+      loc_croco = ncroco_simu[ihalo];
+      mtree_tmp[0] = (MTREEptr) realloc(mtree_tmp[0], (loc_croco+1)*sizeof(MTREE));
+      mtree_tmp[loc_croco-1][0].id[0]     = halos[isimu0][ihalo].mtree[icroco].id[0];
+      mtree_tmp[loc_croco-1][0].haloid[0] = halos[isimu0][ihalo].mtree[icroco].haloid[0];
+      mtree_tmp[loc_croco-1][0].npart[0]  = halos[isimu0][ihalo].mtree[icroco].npart[0];
+      mtree_tmp[loc_croco-1][0].common    = halos[isimu0][ihalo].mtree[icroco].common;
+      mtree_tmp[loc_croco-1][0].id[1]     = halos[isimu0][ihalo].mtree[icroco].id[1];
+      mtree_tmp[loc_croco-1][0].haloid[1] = halos[isimu0][ihalo].mtree[icroco].haloid[1];
+      mtree_tmp[loc_croco-1][0].npart[1]  = halos[isimu0][ihalo].mtree[icroco].npart[1];
       
 #ifdef DEBUG
       fprintf(stderr,"icroco=%ld (of %ld) for ihalo=%ld: jhalo=%ld is     a real progenitor of ihalo=%ld (jhalo has %ld descendants)\n",
@@ -1707,12 +1901,12 @@ int clean_connection(uint64_t ihalo, int isimu0, int isimu1, int iloop)
       halos[isimu0][ihalo].mtree = NULL;
   }
 
-    halos[isimu0][ihalo].global_ncroco = ncroco_simu[1];
+    halos[isimu0][ihalo].global_ncroco = loc_croco;
     halos[isimu0][ihalo].mtree = mtree_tmp;
   }
-#endif
-  return 1;
 }
+#endif /* OLD_CLEAN_CONNECTION */
+#endif
 
 /*==================================================================================================
  * max_merit
@@ -1725,46 +1919,37 @@ uint64_t max_merit(uint64_t jhalo, int isimu)
   }
   else {
 #ifdef DEBUG
-    fprintf(stderr,"jhalo=%"PRIu64" in isimu=%d does not point to anywhere!?\n",jhalo,isimu);
+    fprintf(stderr,"jhalo=%ld in isimu=%d does not point to anywhere!?\n",jhalo,isimu);
 #endif
     return(0);
   }
 }
 
-/*==================================================================================================
- * check_max_merit MPI function
- *==================================================================================================*/
-uint64_t check_max_merit(uint64_t jhalo, int isimu)
-{
-  /* mtree[] is ordered by merit and hence we only need to check the first entry */
-  if(halos[isimu][jhalo].global_ncroco > 0) {
-    return(halos[isimu][jhalo].mtree[0].id[1]);
-  }
-  else {
-#ifdef DEBUG
-    fprintf(stderr,"jhalo=%"PRIu64" in isimu=%d does not point to anywhere!?\n",jhalo,isimu);
-#endif
-    return(0);
-  }
-}
   /* Reallocate halos after having swapped particles among tasks */
 int alloc_halos(int isimu)
 {
-  uint64_t i;
+ 
+#ifdef DEBUG_MPI
+fprintf(stderr, "Alloc %llu halos for sim %d on task %d\n", nHalos[isimu], isimu, LocTask); 
+#endif
 
   halos[isimu] = (HALOptr) calloc(nHalos[isimu], sizeof(HALOS));
+/*
+  uint64_t i;
+  for(i=0; i<nHalos[isimu]; i++)
+  {	// FIXME
+    //halos[isimu][i].Pid = (uint64_t *) calloc(1, sizeof(uint64_t));
+    //halos[isimu][i].Pindex = (uint64_t *) calloc(1, sizeof(uint64_t));
+    //halos[isimu][i].mtree = (MTREEptr) calloc(1, sizeof(MTREE));
+  }
 
   for(i=0; i<nHalos[isimu]; i++)
   {
-    halos[isimu][i].Pid = (uint64_t *) calloc(1, sizeof(uint64_t));
-    halos[isimu][i].Pindex = (uint64_t *) calloc(1, sizeof(uint64_t));
-    halos[isimu][i].mtree = (MTREEptr) calloc(1, sizeof(MTREE));
-  }
-
-  /* Init halo particle number to zero */
-  for(i=0; i<nHalos[isimu]; i++)
     halos[isimu][i].npart = 0;
-
+    halos[isimu][i].ncroco = 0;
+    halos[isimu][i].global_ncroco = 0;
+  }
+*/
  return(1);
 }
 
@@ -1785,7 +1970,7 @@ int add_halos(int ifile, int isimu)
      min_halo = nHalos[isimu];
      nHalos[isimu] += nHalosTmp[isimu];
      totHaloSize += totHaloSizeTmp;
-     halos[isimu] = (HALOptr) realloc(halos[isimu], ( (nHalos[isimu]+1)) * sizeof(HALOS));
+     halos[isimu] = (HALOptr) realloc(halos[isimu], ( (nHalos[isimu])) * sizeof(HALOS)); //TODO nHalos+1 ??
   }
 
   /* copy the halos into the old structure and free up memory */
@@ -1796,9 +1981,7 @@ int add_halos(int ifile, int isimu)
      halos[isimu][ihalo].npart = halos_tmp[isimu][ihalo-min_halo].npart;
      halos[isimu][ihalo].haloid = halos_tmp[isimu][ihalo-min_halo].haloid;
 
-     halos[isimu][ihalo].Xc[0] = halos_tmp[isimu][ihalo-min_halo].Xc[0];
-     halos[isimu][ihalo].Xc[1] = halos_tmp[isimu][ihalo-min_halo].Xc[1];
-     halos[isimu][ihalo].Xc[2] = halos_tmp[isimu][ihalo-min_halo].Xc[2];
+     memcpy(halos[isimu][ihalo].Xc, halos_tmp[isimu][ihalo-min_halo].Xc, 3 * sizeof(float));
 
      sizeHalo = nparts * sizeof(uint64_t);
 
@@ -1815,6 +1998,7 @@ int add_halos(int ifile, int isimu)
 
   /* free the temporary structures */	
   free(halos_tmp[isimu]);
+
   nHalosTmp[isimu]=0;
   totHaloSizeTmp=0;
 
@@ -1824,22 +2008,25 @@ int add_halos(int ifile, int isimu)
   /* Clean up the halos */
 int free_halos(int isimu)
 {
-  uint64_t i;
+  uint64_t ihalo;
 
-  for(i=0; i<nHalos[isimu]; i++)
+  for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
   {
-    if(halos[isimu][i].Pid != NULL)
-      free(halos[isimu][i].Pid);
+    //fprintf(stderr, "halo=%llu/%llu, simu=%d, Pid=%llu\n", ihalo, nHalos[isimu], isimu, halos[isimu][ihalo].Pid[0]);
+    if(halos[isimu][ihalo].Pindex != NULL)
+      free(halos[isimu][ihalo].Pindex);
 
-    if(halos[isimu][i].Pindex != NULL)
-      free(halos[isimu][i].Pindex);
-    
-    if(isimu == 0)	// FIXME : does this make sense?
-    if(halos[isimu][i].mtree != NULL)
-      free(halos[isimu][i].mtree);
+    if(halos[isimu][ihalo].Pidord != NULL)
+      free(halos[isimu][ihalo].Pidord);
+
+    //if(halos[isimu][ihalo].mtree != NULL)
+      //free(halos[isimu][ihalo].mtree);
+
+    if(halos[isimu][ihalo].Pid != NULL)
+      free(halos[isimu][ihalo].Pid);
   }
 
-  free(halos[isimu]);
+ free(halos[isimu]);
 
  return(1);
 }
@@ -1895,28 +2082,28 @@ uint64_t constructHaloId(uint64_t ihalo)
 }
 
 /* Debug routines to check the content of the structures sent across tasks */
-#ifdef DEBUG_MPI
-void check_parts(int isimu)
-{
-  int i=0, ntot;
-  ntot = nPart[isimu];
-	
-    for(i=0; i<ntot; i++)
-      fprintf(stderr,"Local particle %d on task=%d has ID %"PRIu64"\n", i, LocTask, parts[isimu][i].Pid);
-
-}
-
 void check_halos(int isimu)
 {
-  unsigned int i=0, j=0, ntot;
+  unsigned int i=0, jmax=0, ntot;
   ntot = nHalos[isimu];
+   jmax = 15;
 
-    for(i=0; i<ntot; i++)
+    for(i=0; i<jmax; i++)
     {
-      fprintf(stderr,"Local halo %d on task=%d has ID %"PRIu64"\n", i, LocTask, halos[isimu][i].haloid);
-        for(j=0; j<halos[isimu][i].npart; j++)
-           fprintf(stdout, "\t\tpart_id=%"PRIu64"\n", halos[isimu][i].Pid[j]);
+      fprintf(stderr,"Local halo %d on task=%d has ID %"PRIu64" and %"PRIu64" parts Pid = %"PRIu64"\n", i, LocTask, halos[isimu][i].haloid, 
+	halos[isimu][i].npart, halos[isimu][i].Pid[0]);
+        //for(j=0; j<3; j++)
+          // fprintf(stdout, "\t\tpart_id=%"PRIu64"\n", halos[isimu][i].Pid[j]);
     }
+
+    for(i=ntot-jmax; i<ntot; i++)
+    {
+      fprintf(stderr,"Local halo %d on task=%d has ID %"PRIu64" and %"PRIu64" parts Pid = %"PRIu64"\n", i, LocTask, halos[isimu][i].haloid, 
+	halos[isimu][i].npart, halos[isimu][i].Pid[0]);
+       // for(j=0; j<3; j++)
+         //  fprintf(stdout, "\t\tpart_id=%"PRIu64"\n", halos[isimu][i].Pid[j]);
+    }
+
 }
 
 
@@ -1949,4 +2136,3 @@ void dump_log_halo(int isimu, int ihalo)
   fclose(log_halo);
 }
 #endif /* DEBUG_LOG */
-#endif /* DEBUG_MPI */
