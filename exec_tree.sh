@@ -24,10 +24,10 @@ temp_halo=$mtree'/temp/list_halo_files.ahf'
 temp_out=$mtree'/temp/list_files_numbers.ahf'
 
 # Box size in kpc (needed for the haloes at the box boundaries, for periodic boxes)
-BOX=64000
+BOX=62500
 
 # Output files directory + prefix
-output=$mtree'/output/'$model'/test'
+output=$mtree'/output/'$model'/bothways_s13'
 #base_catalog=$home_dir'/all_halos/'$model'/'
 base_catalog=$mtree'/files/'$model'/'
 

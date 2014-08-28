@@ -23,7 +23,6 @@
  * 	- Impose the HALO_MIN_PART already when reading particles in (save memory)
  *	- Use halos_mpi struct to send Xc[] - halo positions - and to read them in from AHF_halos
  *	- Check the periodic conditions algorithm (can be improved perhaps?)
- *      - Remove Pindex from the HALO struct (useless ?)
  * 	- Each halo struct might just contain a pointer to halo_mpi instead of storing all the informations
  *==================================================================================================*/
 
@@ -42,17 +41,18 @@
 #include <mpi.h>
 #include <omp.h>
 
-#define MINCOMMON       10            // we only cross-correlate haloes if they at least share MINCOMMON particles
+#define MINCOMMON       20            // we only cross-correlate haloes if they at least share MINCOMMON particles
 //#define	USE_HALO_MIN_PART
 
 #ifdef	USE_HALO_MIN_PART
 #define HALO_MIN_PART	50
 #endif
 
-//#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
+//#define ONLY_USE_PTYPE 1
+#define MTREE_BOTH_WAYS               // make sure that every halo has only one descendant
 #define SUSSING2013                   // write _mtree in format used for Sussing Merger Trees 2013
 
-#define DEBUG_MPI
+//#define DEBUG_MPI
 //#define DEBUG_LOG
 
 #define READ_HALO_ID_FROM_FILE		// With this flag on the HALO_ID will be read directly from the AHF_halos files
@@ -74,7 +74,7 @@
 #define ORDER		// Order halos in merger tree by merit function
 
 //#define DISABLE_MAX_HALO_DISTANCE
-#define MAX_HALO_DIST 1000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
+#define MAX_HALO_DIST 5000 // Maximum c.o.m. distance between halos - if larger than this, we skip the comparison (kpc)
 
 /*-------------------------------------------------------------------------------------
  *                                  THE STRUCTURES
@@ -95,8 +95,6 @@ typedef struct HALOS
   uint64_t  npart;
   float    Xc[3];		// C.o.m. position of the halo
   uint64_t *Pid;	// Pid holds the global particle ID
-  uint64_t *Pidord;	// Pid holds the global particle ID ordered using qsort
-  uint64_t *Pindex;	// Index is the local particle position in struct parts[i][index]
   uint64_t  ncroco;	// Local number of cross correlation
   uint64_t  global_ncroco;	// Global number - sums all the haloes swapped so far
   MTREEptr  mtree;
@@ -538,7 +536,7 @@ int main(int argv, char **argc)
  * halos among them. 
  * At this point only the halos structures have been read-in; the inverse
  * mapping to the particles will be done after the halos have been scattered.
- * Since tasks that read in the halos use dynamically allocated memory (the for the Pid and Pindex 
+ * Since tasks that read in the halos use dynamically allocated memory (for Pid, that is
  * relative to the particles belonging to the halo) we use the MPI_Pack/MPI_Unpack functions.
  *
  *==================================================================================================*/
@@ -662,8 +660,8 @@ int load_balance(int isimu)
 
 #endif
 
-      /* Each halo holds two uint64_t and two arrays Pid and Pindex */
-      sizeTempBuffer = 2 * sizeUInt64 * (halos[isimu][jhalo].npart + 1) + 3 * sizeof(float);
+      /* Each halo holds two uint64_t, three Xc floats and two arrays Pid */
+      sizeTempBuffer = sizeUInt64 * (halos[isimu][jhalo].npart + 2) + 3 * sizeof(float);
 
       if(irecv == nRecvTasks[LocTask]) /* keep the halo locally */
       {
@@ -704,7 +702,6 @@ int load_balance(int isimu)
       /* reallocate the local halos struct at each step to free up some memory */
 #ifndef IMPROVE_LB
       free(halos[isimu][jhalo].Pid);
-      free(halos[isimu][jhalo].Pindex);
       halos[isimu] = (HALOptr) realloc(halos[isimu], (jhalo+1) * sizeof(HALOS));
 #endif
    } /* for ihalo */
@@ -728,15 +725,8 @@ int load_balance(int isimu)
       sizeLocHalo = (size_t) locNPart * sizeUInt64;
 
       halos[isimu][ihalo].Pid = (uint64_t *) malloc (sizeLocHalo);
-      halos[isimu][ihalo].Pindex = (uint64_t *) malloc (sizeLocHalo);
 
       memcpy(halos[isimu][ihalo].Pid, temp_halo[isimu][ihalo].Pid, sizeLocHalo);   
-
-      for(jpart=0; jpart<locNPart; jpart++)
-      {
-        halos[isimu][ihalo].Pindex[jpart] = ipart;
-        ipart++;
-      }
       
       free(temp_halo[isimu][ihalo].Pid);
    }
@@ -830,16 +820,9 @@ int load_balance(int isimu)
        sizeLocHalo = (size_t) locNPart * sizeUInt64;
 
        halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeLocHalo);
-       halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeLocHalo);
 
        MPI_Unpack(&haloSendBuffer[0], sizeSendBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pid[0], 
         sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
-
-      for(jpart=0; jpart<locNPart; jpart++)
-      {
-        halos[isimu][ihalo].Pindex[jpart] = ipart;
-        ipart++;
-      }
     }
 
    } /* if(LocTask >= NReadTask)*/
@@ -870,18 +853,20 @@ int load_balance(int isimu)
 }
 
 
-
+/* This function sorts the Pids in ascending order, to enable a faster comparison of the halo contents */
 int order_halo_ids(int isimu)
 {
-   uint64_t ihalo=0, locNPart=0;
+   uint64_t ihalo=0, locNPart=0, *Pidord=NULL;
  
+   /* Store the ordered IDs for successive comparison */
    for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
     {
-      /* Store the ordered IDs for successive comparison */
       locNPart = halos[isimu][ihalo].npart;
-      halos[isimu][ihalo].Pidord = calloc(locNPart, sizeof(uint64_t));
-      memcpy(halos[isimu][ihalo].Pidord, halos[isimu][ihalo].Pid, locNPart * sizeof(uint64_t));   
-      qsort(halos[isimu][ihalo].Pidord, locNPart, sizeof(uint64_t), &cmpfunc);
+      Pidord = calloc(locNPart, sizeof(uint64_t));
+      memcpy(Pidord, halos[isimu][ihalo].Pid, locNPart * sizeof(uint64_t));   
+      qsort(Pidord, locNPart, sizeof(uint64_t), &cmpfunc);
+      free(halos[isimu][ihalo].Pid);
+      halos[isimu][ihalo].Pid = Pidord;
     } 
 
   return 1;
@@ -916,9 +901,8 @@ int MPI_Swaphalos(int isimu)
       locNPart = halos[isimu][ihalo].npart;
       sizeLocHalo = locNPart * sizeUInt64; 
 
-      /* Each halo holds two uint64_t, two arrays Pid and Pindex, plus the coordinates */
+      /* Each halo holds two uint64_t, and array Pid and the coordinates */
       sizeSendBuffer += sizeUInt64 * (locNPart + 2) + 3 * sizeof(float);
-      //sizeSendBuffer += 2 * sizeUInt64 + 3 * sizeof(float);
       haloSendBuffer = (void *) realloc(haloSendBuffer, sizeSendBuffer);
 
 //	fprintf(stderr, "size send = %zd npart = %"PRIu64" locsize = %zd\t", sizeSendBuffer, locNPart, sizeLocHalo );
@@ -936,17 +920,16 @@ int MPI_Swaphalos(int isimu)
       MPI_Pack(&halos[isimu][ihalo].Pid[0], sizeLocHalo, MPI_BYTE, haloSendBuffer, 
         sizeSendBuffer, &buffer_position, MPI_COMM_WORLD);
 	
-      /* Free Pid and Pindex space once it's packed */
+      /* Free Pid and Pidord space once it's packed */
       free(halos[isimu][ihalo].Pid);
-
-#ifdef TEST
-      free(halos[isimu][ihalo].Pindex);
-      free(halos[isimu][ihalo].Pidord);
-#endif
     } /* for ihalo */
 
+   free(halos[isimu]);
+
+#ifdef DEBUG_MPI
    fprintf(stderr, "nhalos to be sent %"PRIu64" loc_send_size = %zd bytes, recv=%d send=%d\n", 
 		nHalos[isimu], sizeSendBuffer, LocTask, SendTask);
+#endif
 
    MPI_Sendrecv(&nHalos[isimu], sizeof(uint64_t), MPI_BYTE, RecvTask, 0,
                 &nHalosBuffer[isimu],  sizeof(uint64_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
@@ -954,10 +937,10 @@ int MPI_Swaphalos(int isimu)
    MPI_Sendrecv(&sizeSendBuffer, sizeof(size_t), MPI_BYTE, RecvTask, 0,
                 &sizeRecvBuffer, sizeof(size_t), MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
 
+#ifdef DEBUG_MPI
    fprintf(stderr, "nhalos to recieve %"PRIu64" loc_recv_size = %zd bytes, recv=%d send=%d\n", 
 		nHalosBuffer[isimu], sizeRecvBuffer, RecvTask, LocTask);
-
-//   free(halos[isimu]);
+#endif
 
    haloRecvBuffer = malloc(sizeRecvBuffer);
    nHalos[isimu] = nHalosBuffer[isimu];
@@ -965,8 +948,7 @@ int MPI_Swaphalos(int isimu)
    MPI_Sendrecv(haloSendBuffer, sizeSendBuffer, MPI_BYTE, RecvTask, 0,
                 haloRecvBuffer, sizeRecvBuffer, MPI_BYTE, SendTask, 0, MPI_COMM_WORLD, &status);
 
-	// TODO may give segfault problems
-  // free(haloSendBuffer);
+    free(haloSendBuffer);
 
 #ifdef DEBUG_MPI
     fprintf(stderr, "Task=%d has done packing data, local data size is now=%zd, with %"PRIu64" halos.\n", 
@@ -994,29 +976,10 @@ int MPI_Swaphalos(int isimu)
        locNPart = halos[isimu][ihalo].npart;
        sizeLocHalo = (size_t) locNPart * sizeUInt64;
 
-	uint64_t *memtest;
-       memtest= (uint64_t *) malloc(sizeLocHalo);
-
        halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeLocHalo);
-       halos[isimu][ihalo].Pidord = (uint64_t *) malloc(sizeLocHalo);
-       halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeLocHalo);
-
-//	fprintf(stderr, "Halo[%d] on task %d ID=%"PRIu64" has npart %"PRIu64"\n", ihalo, LocTask, 
-//		halos[isimu][ihalo].haloid, locNPart);
-
-//       MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &memtest[0], 
-//        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
 
        MPI_Unpack(haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pid[0], 
         sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
-
-#ifdef TEST
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pidord[0], 
-        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
-
-       MPI_Unpack(&haloRecvBuffer, sizeRecvBuffer, &buffer_pos_recv, &halos[isimu][ihalo].Pindex[0], 
-        sizeLocHalo, MPI_BYTE, MPI_COMM_WORLD);
-#endif
    } /* if(LocTask >= NReadTask)*/
 
 #ifdef DEBUG_MPI
@@ -1024,10 +987,8 @@ int MPI_Swaphalos(int isimu)
 	LocTask, sizeRecvBuffer, nHalos[isimu]);
 #endif
 
-#ifdef TEST
-  /* Now free local buffers */
-  free(haloRecvBuffer); // FIXME
-#endif
+  /* Now free local buffer */
+  free(haloRecvBuffer); 
 
   return(1);
 }
@@ -1155,7 +1116,7 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   FILE     *fpin;
   char      line[MAXSTRING];
   int64_t   ihalo;
-  uint64_t  nPartInHalo, nPartInUse, ipart, Pid, Pindex, Ptype, haloid;
+  uint64_t  nPartInHalo, nPartInUse, ipart, Pid, Ptype, haloid;
   clock_t    elapsed = (clock_t)0;
 
   elapsed = clock();
@@ -1179,7 +1140,7 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   ihalo         = -1;
   halos_tmp[isimu]  = NULL;
 
-  /* this array keeps track of the size of each halo's dynamically allocated particle informations, Pid and Pindex */
+  /* this array keeps track of the size of each halo's dynamically allocated particle informations, Pid */
   totHaloSizeTmp = 0;
 
   /* get the first line from file */
@@ -1189,12 +1150,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
   if(strncmp(line,"#",1) != 0 && sscanf(line,"%"SCNu64" %"SCNu64, &nPartInHalo, &haloid) == 1)
 
     fgets(line,MAXSTRING,fpin);  
-  
-      /* local numbering of the particle */
-  if(ifile == 0)
-      Pindex = 0;
-  else
-      Pindex++;
 
   do {
     if(strncmp(line,"#",1) != 0)
@@ -1230,7 +1185,6 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
       
       /* halos_tmp[][].Pid will be incrementally filled using realloc() */
       halos_tmp[isimu][ihalo].Pid = NULL;
-      halos_tmp[isimu][ihalo].Pindex = NULL;
 
       nPartInUse = 0;
 
@@ -1256,16 +1210,13 @@ int read_particles(char filename[MAXSTRING], int isimu, int ifile)
 #endif
          {
           halos_tmp[isimu][ihalo].Pid    = (uint64_t *) realloc(halos_tmp[isimu][ihalo].Pid, (nPartInUse+1)*sizeof(uint64_t));
-          halos_tmp[isimu][ihalo].Pindex = (uint64_t *) realloc(halos_tmp[isimu][ihalo].Pindex, (nPartInUse+1)*sizeof(uint64_t));
           if(halos_tmp[isimu][ihalo].Pid == NULL) {
             fprintf(stderr,"read_particles: could not realloc() halos_tmp[%d][%ld].Pid for %"PRIu64"particles\nABORTING\n",isimu,(long)ihalo,(nPartInUse+1));
             exit(-1);
           }
 
           halos_tmp[isimu][ihalo].Pid[nPartInUse] = Pid;
-          halos_tmp[isimu][ihalo].Pindex[nPartInUse] = Pindex;
           nPartInUse++;
-	  Pindex++;
          }
        }
       
@@ -1595,6 +1546,7 @@ int write_mtree(int isimu0, char OutFile[MAXSTRING])
   return(1);
 }
 
+#ifdef MAX_HALO_DIST
 /* Computes the distance of the center of mass of two given halos. If their distance is larger than MAX
  * then the comparison will be skipped. Assumes kpc units.
  */
@@ -1635,7 +1587,7 @@ int compute_com_distance(uint64_t ihalo0, uint64_t ihalo1, int isimu0, int isimu
     Dist = 1;
   return Dist;
 }
-
+#endif
 
 int copy_halos(int isimu0, int isimu1)
 {
@@ -1655,12 +1607,7 @@ int copy_halos(int isimu0, int isimu1)
  
       halos[isimu1][ihalo].mtree = NULL;
       halos[isimu1][ihalo].Pid = (uint64_t *) malloc(sizeHalo);
-      halos[isimu1][ihalo].Pidord = (uint64_t *) malloc(sizeHalo);
-      halos[isimu1][ihalo].Pindex = (uint64_t *) malloc(sizeHalo);
-
       memcpy(halos[isimu1][ihalo].Pid, halos[isimu0][ihalo].Pid, sizeHalo);   
-      memcpy(halos[isimu1][ihalo].Pidord, halos[isimu0][ihalo].Pidord, sizeHalo);
-      memcpy(halos[isimu1][ihalo].Pindex, halos[isimu0][ihalo].Pindex, sizeHalo);
    }
 
   return 1;
@@ -1939,7 +1886,6 @@ fprintf(stderr, "Alloc %llu halos for sim %d on task %d\n", nHalos[isimu], isimu
   for(i=0; i<nHalos[isimu]; i++)
   {	// FIXME
     //halos[isimu][i].Pid = (uint64_t *) calloc(1, sizeof(uint64_t));
-    //halos[isimu][i].Pindex = (uint64_t *) calloc(1, sizeof(uint64_t));
     //halos[isimu][i].mtree = (MTREEptr) calloc(1, sizeof(MTREE));
   }
 
@@ -1986,13 +1932,10 @@ int add_halos(int ifile, int isimu)
      sizeHalo = nparts * sizeof(uint64_t);
 
      halos[isimu][ihalo].Pid = (uint64_t *) malloc(sizeHalo);
-     halos[isimu][ihalo].Pindex = (uint64_t *) malloc(sizeHalo);
 
      memcpy(halos[isimu][ihalo].Pid, halos_tmp[isimu][ihalo-min_halo].Pid, sizeHalo);   
-     memcpy(halos[isimu][ihalo].Pindex, halos_tmp[isimu][ihalo-min_halo].Pindex, sizeHalo);
 
      /* free temp memory as the particles are copied */
-     free(halos_tmp[isimu][ihalo-min_halo].Pindex);
      free(halos_tmp[isimu][ihalo-min_halo].Pid);
   }
 
@@ -2012,13 +1955,6 @@ int free_halos(int isimu)
 
   for(ihalo=0; ihalo<nHalos[isimu]; ihalo++)
   {
-    //fprintf(stderr, "halo=%llu/%llu, simu=%d, Pid=%llu\n", ihalo, nHalos[isimu], isimu, halos[isimu][ihalo].Pid[0]);
-    if(halos[isimu][ihalo].Pindex != NULL)
-      free(halos[isimu][ihalo].Pindex);
-
-    if(halos[isimu][ihalo].Pidord != NULL)
-      free(halos[isimu][ihalo].Pidord);
-
     //if(halos[isimu][ihalo].mtree != NULL)
       //free(halos[isimu][ihalo].mtree);
 
@@ -2039,8 +1975,8 @@ void intersection(int isimu0, int isimu1, uint64_t ihalo, uint64_t khalo, uint64
 
 	while (ipart < halos[isimu0][ihalo].npart && kpart < halos[isimu1][khalo].npart)
 	{
-		apart = halos[isimu0][ihalo].Pidord[ipart];
-		bpart = halos[isimu1][khalo].Pidord[kpart];
+		apart = halos[isimu0][ihalo].Pid[ipart];
+		bpart = halos[isimu1][khalo].Pid[kpart];
 
 		if (apart == bpart)
 		{
@@ -2127,11 +2063,7 @@ void dump_log_halo(int isimu, int ihalo)
 		halos[isimu][ihalo].haloid);
 
     for(i=0; i<ntot; i++)
-    {
-	fprintf(log_halo, "%"PRIu64"\t%"PRIu64"\n", 
-		halos[isimu][ihalo].Pid[i],
-		halos[isimu][ihalo].Pindex[i]);
-    }
+	fprintf(log_halo, "%"PRIu64"\n", halos[isimu][ihalo].Pid[i],
  
   fclose(log_halo);
 }
