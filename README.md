@@ -1,7 +1,7 @@
-MergerTreeMPI
+P-MergerTree
 =============
-Edoardo Carlesi - 2013
-edoardo.carlesi@uam.es
+Edoardo Carlesi - 2013-2018
+ecarlesi@aip.de
 
 
 This is a massively MPI parallel version of the original MergerTree.c code, part of the AHF analysis package.
