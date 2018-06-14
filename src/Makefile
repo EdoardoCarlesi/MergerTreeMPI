@@ -27,7 +27,6 @@ SRCS	=\
 	common.c \
 	ptree_funcs.c
 
-
 OBJS	=\
 	ptree_io.o \
 	ptree_vars.o \
@@ -42,14 +41,15 @@ LIBS 	=\
 	libahf/libahf.a \
 	libamr_serial/libamr_serial.a
 
-# everything in src/
+#========================
+# Main binary executable
 #========================
 
 P-MergerTree	: P-MergerTree ${OBJS} ${LIBS}
 		$(CC) $(CFLAGS) $(LFLAGS) -o P-MergerTree  ${LIBS} P-MergerTree.c  ${SRCS} ${LIBS} ${LNFLAGS}
 
-
-# what's to make ?
+# ----------------
+# 	Clean
 # ----------------
 
 clean:
@@ -60,7 +60,8 @@ clean:
 	cd libutility ; ${MAKE} clean
 	cd libamr_serial ; ${MAKE} clean
 
-# how to make the libraries?
+# ------------------------------
+#	 Make the libraries
 # ------------------------------
 libsfc/libsfc.a:
 	cd libsfc ; ${MAKE} libsfc.a
@@ -76,7 +77,6 @@ libutility/libutility.a:
 
 libamr_serial/libamr_serial.a:
 	cd libamr_serial ; ${MAKE} libamr_serial.a
-
 
 #dependencies for .o files
 # ------------------------
@@ -97,4 +97,3 @@ ptree_funcs.o:	ptree_funcs.c
 
 P-MergerTree.o:	P-MergerTree.c
 	${CC} ${CFLAGS} -c P-MergerTree.c
-

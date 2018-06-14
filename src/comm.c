@@ -5,7 +5,6 @@
  */
 
 /* Only needed in MPI mode */
-#ifdef WITH_MPI
 
 /**********************************************************************\
  *    Includes                                                        *
@@ -18,6 +17,7 @@
 #include "libutility/alloc_struct.h"
 #include "libamr_serial/get_nnodes.h"
 
+#ifdef WITH_MPI
 #ifdef EXTRAE_API_USAGE
 #include <extrae_user_events.h>
 #endif

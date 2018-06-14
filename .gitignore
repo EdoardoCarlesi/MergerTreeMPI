@@ -1,6 +1,7 @@
 bin/P-MergerTree
 *.bkp
 *.o
+*.a
 src/*.o
 test*
 old_*
