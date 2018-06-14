@@ -14,7 +14,6 @@ void     check_node       (gridls *cur_grid, nptr node, long z_node, long y_node
 
 long loc_modulo(long a, long  b);
 
-# ifdef WITH_MPI
 #  include "../libsfc/sfc.h"
 /**
  * \brief This function searches in a given grid for a node at
@@ -42,8 +41,6 @@ get_node_from_key(gridls *curgrid,
 extern nptr
 get_node_from_pos(gridls *curgrid,
                   uint32_t *pos);
-
-# endif /* WITH_MPI */
 
 #endif
 

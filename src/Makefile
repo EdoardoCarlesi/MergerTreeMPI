@@ -45,8 +45,11 @@ LIBS 	=\
 # Main binary executable
 #========================
 
-P-MergerTree	: P-MergerTree ${OBJS} ${LIBS}
-		$(CC) $(CFLAGS) $(LFLAGS) -o P-MergerTree  ${LIBS} P-MergerTree.c  ${SRCS} ${LIBS} ${LNFLAGS}
+#P-MergerTree	: P-MergerTree ${OBJS} ${LIBS}
+#		$(CC) $(CFLAGS) $(LFLAGS) -o P-MergerTree  ${LIBS} P-MergerTree.c  ${SRCS} ${LIBS} ${LNFLAGS}
+
+P-MergerTree	: main.o ${OBJS} ${LIBS}
+		$(CC) $(CFLAGS) $(LFLAGS) -o P-MergerTree  main.o ${OBJS} ${LIBS} ${LNFLAGS}
 
 # ----------------
 # 	Clean
@@ -81,7 +84,7 @@ libamr_serial/libamr_serial.a:
 #dependencies for .o files
 # ------------------------
 comm.o:	comm.c
-	${CC} ${CFLAGS} -c comm.c
+	${CC} ${CFLAGS} -c comm.c 
 
 common.o:	common.c
 	${CC} ${CFLAGS} -c common.c

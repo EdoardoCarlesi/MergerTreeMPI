@@ -1405,8 +1405,6 @@ exit_routine:
 }
 
 
-#ifdef WITH_MPI
-
 extern nptr
 get_node_from_key(gridls *curgrid,
                   sfc_key_t key,
@@ -1461,4 +1459,3 @@ get_node_from_pos(gridls *curgrid,
 	return nq->loc + (pos[0] - nq->x);
 }
 
-#endif /* WITH_MPI */
